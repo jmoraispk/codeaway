@@ -564,21 +564,21 @@ def fastapi_client():
 
     calls["auto_detect"] = []
 
-    def save_bridge_setup(name):
+    def new_bridge_setup(name):
         # Real helper does the heavy lifting; we wire it through the
         # cfg dict so endpoint tests can verify the bridge actually
         # mutates state, not just calls back.
-        from press_store import save_setup_from_current
+        from press_store import new_setup
 
-        sid = save_setup_from_current(calls["cfg"], name)
-        calls.setdefault("setup_saves", []).append((sid, name))
+        sid = new_setup(calls["cfg"], name)
+        calls.setdefault("setup_news", []).append((sid, name))
         return sid
 
-    def load_bridge_setup(setup_id):
-        from press_store import load_setup
+    def activate_bridge_setup(setup_id):
+        from press_store import activate_setup
 
-        ok = load_setup(calls["cfg"], setup_id)
-        calls.setdefault("setup_loads", []).append((setup_id, ok))
+        ok = activate_setup(calls["cfg"], setup_id)
+        calls.setdefault("setup_activates", []).append((setup_id, ok))
         return ok
 
     def delete_bridge_setup(setup_id):
@@ -598,8 +598,8 @@ def fastapi_client():
         set_rules_running=set_rules_running,
         rename_window=rename_window,
         auto_detect_windows=auto_detect_windows,
-        save_bridge_setup=save_bridge_setup,
-        load_bridge_setup=load_bridge_setup,
+        new_bridge_setup=new_bridge_setup,
+        activate_bridge_setup=activate_bridge_setup,
         delete_bridge_setup=delete_bridge_setup,
     )
     service = BridgeService(callbacks)
@@ -1132,121 +1132,209 @@ def test_short_label_trims_cursor_suffix():
 
 # ---- Setups: data-layer helpers -------------------------------------------
 
-def test_save_setup_from_current_deep_copies_windows():
-    """A saved setup is an independent snapshot — mutating bridge.windows
-    afterwards must not leak into the saved setup."""
-    from press_store import default_config, save_setup_from_current
-
-    cfg = default_config()
-    cfg["bridge"]["windows"] = [
-        {"id": "w1", "name": "Main", "region": [0, 0, 800, 600]},
-    ]
-    sid = save_setup_from_current(cfg, "Snapshot")
-    setups = cfg["bridge"]["setups"]
-    assert len(setups) == 1
-    assert setups[0]["id"] == sid
-    assert setups[0]["name"] == "Snapshot"
-    assert setups[0]["windows"][0]["name"] == "Main"
-    # Mutate the live windows — saved setup should not change.
-    cfg["bridge"]["windows"][0]["name"] = "Renamed"
-    assert setups[0]["windows"][0]["name"] == "Main"
-
-
-def test_load_setup_replaces_live_windows():
-    """Load swaps the live windows for the saved snapshot. The saved
-    setup itself stays in the saved list — load is non-destructive of
-    the snapshot."""
-    from press_store import default_config, load_setup, save_setup_from_current
-
-    cfg = default_config()
-    cfg["bridge"]["windows"] = [
-        {"id": "w1", "name": "Original", "region": [0, 0, 100, 100]},
-    ]
-    sid = save_setup_from_current(cfg, "Backup")
-    # Now mutate the live windows...
-    cfg["bridge"]["windows"] = [
-        {"id": "w2", "name": "Different", "region": [10, 10, 200, 200]},
-    ]
-    # ...and load the snapshot.
-    assert load_setup(cfg, sid) is True
-    [w] = cfg["bridge"]["windows"]
-    assert w["name"] == "Original"
-    # Setup is still in the saved list.
-    assert len(cfg["bridge"]["setups"]) == 1
-
-
-def test_load_setup_returns_false_for_unknown_id():
-    from press_store import default_config, load_setup
-
-    cfg = default_config()
-    assert load_setup(cfg, "no-such-id") is False
-
-
-def test_delete_setup_removes_without_touching_live_windows():
-    from press_store import (
-        default_config,
-        delete_setup,
-        save_setup_from_current,
-    )
-
-    cfg = default_config()
-    cfg["bridge"]["windows"] = [
-        {"id": "w1", "name": "Live", "region": [0, 0, 100, 100]},
-    ]
-    sid = save_setup_from_current(cfg, "Saved")
-    assert delete_setup(cfg, sid) is True
-    assert cfg["bridge"]["setups"] == []
-    # Live windows unchanged.
-    assert cfg["bridge"]["windows"][0]["name"] == "Live"
-    # Re-deleting the same id is a no-op.
-    assert delete_setup(cfg, sid) is False
-
-
-def test_setups_normalize_on_load(tmp_path, monkeypatch):
-    """Old configs without a setups field load with an empty list,
-    and saved-setup dicts with junk fields get normalised cleanly."""
-    monkeypatch.setattr(press_store, "TEMPLATES_DIR", tmp_path)
-
-    cfg = press_store.normalize_config({"bridge": {}})
-    assert cfg["bridge"]["setups"] == []
-
+def test_normalize_creates_default_setup_from_live_windows():
+    """A config with windows but no setups gets a 'Default' setup
+    auto-created from those windows on normalize. The active id
+    points at it."""
     cfg = press_store.normalize_config(
         {
             "bridge": {
-                "setups": [
-                    {
-                        "id": "abc",
-                        "name": "From file",
-                        "windows": [
-                            {"id": "w1", "name": "X", "region": [0, 0, 100, 100]},
-                        ],
-                    },
-                    # Junk entry — should normalise to defaults.
-                    {"name": "  "},
+                "windows": [
+                    {"id": "w1", "name": "Existing", "region": [0, 0, 100, 100]},
                 ],
             }
         }
     )
-    [s1, s2] = cfg["bridge"]["setups"]
-    assert s1["id"] == "abc"
-    assert s1["name"] == "From file"
-    assert len(s1["windows"]) == 1
-    # The blank-named setup falls back to "Default" via default_setup.
-    assert s2["name"] == "Default"
+    bridge = cfg["bridge"]
+    assert len(bridge["setups"]) == 1
+    [setup] = bridge["setups"]
+    assert setup["name"] == "Default"
+    assert setup["windows"][0]["name"] == "Existing"
+    assert bridge["active_setup_id"] == setup["id"]
+
+
+def test_normalize_wraps_live_as_current_when_setups_exist_but_no_active():
+    """If a config has existing setups but no active_setup_id (e.g.
+    migrating from a previous schema), the live windows become a
+    new 'Current' setup so the user's view is preserved alongside
+    pre-existing saved layouts."""
+    cfg = press_store.normalize_config(
+        {
+            "bridge": {
+                "windows": [
+                    {"id": "live", "name": "Live", "region": [0, 0, 50, 50]},
+                ],
+                "setups": [
+                    {"id": "old", "name": "Old", "windows": []},
+                ],
+            }
+        }
+    )
+    bridge = cfg["bridge"]
+    assert len(bridge["setups"]) == 2
+    # 'Current' is prepended so it's the active one.
+    assert bridge["setups"][0]["name"] == "Current"
+    assert bridge["active_setup_id"] == bridge["setups"][0]["id"]
+    # And the old setup is still there.
+    assert bridge["setups"][1]["name"] == "Old"
+
+
+def test_new_setup_creates_empty_active_and_mirrors_outgoing():
+    """new_setup mirrors the outgoing setup's windows first so its
+    state is preserved, then creates an empty setup and activates it."""
+    from press_store import new_setup
+
+    cfg = press_store.normalize_config(
+        {
+            "bridge": {
+                "windows": [
+                    {"id": "w1", "name": "Main", "region": [0, 0, 800, 600]},
+                ],
+            }
+        }
+    )
+    old_active = cfg["bridge"]["active_setup_id"]
+
+    new_id = new_setup(cfg, "Blank slate")
+    bridge = cfg["bridge"]
+    # Two setups now: the old one (with its 1 window mirrored) and
+    # the new empty active one.
+    assert len(bridge["setups"]) == 2
+    assert bridge["active_setup_id"] == new_id
+    assert bridge["windows"] == []
+    # Old setup retained its windows.
+    old = next(s for s in bridge["setups"] if s["id"] == old_active)
+    assert len(old["windows"]) == 1
+    assert old["windows"][0]["name"] == "Main"
+
+
+def test_activate_setup_swaps_live_windows_and_mirrors_outgoing():
+    """Activating a different setup mirrors the outgoing setup's
+    windows first (so edits aren't lost), then loads the incoming
+    setup's snapshot into bridge.windows."""
+    from press_store import activate_setup, new_setup
+
+    cfg = press_store.normalize_config(
+        {
+            "bridge": {
+                "windows": [
+                    {"id": "w1", "name": "Main", "region": [0, 0, 100, 100]},
+                ],
+            }
+        }
+    )
+    setup_a = cfg["bridge"]["active_setup_id"]
+    setup_b = new_setup(cfg, "Other")  # switches to empty B
+    # Edit B's windows.
+    cfg["bridge"]["windows"] = [
+        {"id": "wB", "name": "InB", "region": [0, 0, 50, 50]},
+    ]
+
+    # Switch back to A — B's edit should be preserved (mirrored on switch).
+    assert activate_setup(cfg, setup_a) is True
+    assert cfg["bridge"]["active_setup_id"] == setup_a
+    [w] = cfg["bridge"]["windows"]
+    assert w["name"] == "Main"
+
+    # Switching to B again brings back the InB window.
+    assert activate_setup(cfg, setup_b) is True
+    [w] = cfg["bridge"]["windows"]
+    assert w["name"] == "InB"
+
+
+def test_activate_setup_unknown_id_returns_false_and_no_op():
+    from press_store import activate_setup
+
+    cfg = press_store.normalize_config({"bridge": {}})
+    before = list(cfg["bridge"]["windows"])
+    active = cfg["bridge"]["active_setup_id"]
+    assert activate_setup(cfg, "no-such-id") is False
+    # Live state untouched.
+    assert cfg["bridge"]["windows"] == before
+    assert cfg["bridge"]["active_setup_id"] == active
+
+
+def test_delete_setup_swaps_active_to_first_remaining():
+    """Deleting the active setup activates the first remaining
+    setup and loads its windows into bridge.windows."""
+    from press_store import delete_setup, new_setup
+
+    cfg = press_store.normalize_config(
+        {
+            "bridge": {
+                "windows": [
+                    {"id": "w1", "name": "InDefault", "region": [0, 0, 100, 100]},
+                ],
+            }
+        }
+    )
+    default_id = cfg["bridge"]["active_setup_id"]
+    new_id = new_setup(cfg, "New")
+    # Edit New's windows so we can verify Default's windows come back.
+    cfg["bridge"]["windows"] = [{"id": "wN", "name": "InNew"}]
+
+    assert delete_setup(cfg, new_id) is True
+    # Default is back as the only setup, active, with its windows.
+    assert cfg["bridge"]["active_setup_id"] == default_id
+    [w] = cfg["bridge"]["windows"]
+    assert w["name"] == "InDefault"
+
+
+def test_delete_last_setup_creates_fresh_default():
+    """If the only remaining setup is deleted, a fresh empty Default
+    is auto-created and activated — invariant: always one setup."""
+    from press_store import delete_setup
+
+    cfg = press_store.normalize_config({"bridge": {}})
+    only_id = cfg["bridge"]["active_setup_id"]
+    assert delete_setup(cfg, only_id) is True
+    # A new Default replaced it.
+    assert len(cfg["bridge"]["setups"]) == 1
+    new_active = cfg["bridge"]["setups"][0]
+    assert new_active["name"] == "Default"
+    assert cfg["bridge"]["active_setup_id"] == new_active["id"]
+    assert cfg["bridge"]["windows"] == []
+
+
+def test_sync_active_setup_mirrors_live_windows():
+    """sync_active_setup is the mirror step that save_config calls
+    before persisting — it copies bridge.windows into the active
+    setup's snapshot so the on-disk state has them paired."""
+    from press_store import sync_active_setup
+
+    cfg = press_store.normalize_config(
+        {
+            "bridge": {
+                "windows": [
+                    {"id": "w1", "name": "One", "region": [0, 0, 10, 10]},
+                ],
+            }
+        }
+    )
+    active_id = cfg["bridge"]["active_setup_id"]
+    # Mutate live windows without going through any helper.
+    cfg["bridge"]["windows"].append(
+        {"id": "w2", "name": "Two", "region": [0, 0, 20, 20]}
+    )
+    sync_active_setup(cfg)
+    active = next(s for s in cfg["bridge"]["setups"] if s["id"] == active_id)
+    assert [w["name"] for w in active["windows"]] == ["One", "Two"]
 
 
 # ---- Setups: HTTP endpoints -----------------------------------------------
 
-def test_list_setups_endpoint(fastapi_client):
+def test_list_setups_endpoint_includes_active_id(fastapi_client):
     client, service, calls = fastapi_client
     calls["cfg"]["bridge"]["setups"] = [
         {"id": "a", "name": "First", "windows": [{"id": "w1", "name": "X"}]},
         {"id": "b", "name": "Second", "windows": []},
     ]
+    calls["cfg"]["bridge"]["active_setup_id"] = "b"
     res = client.get("/api/bridge/setups")
     assert res.status_code == 200
     data = res.json()
     assert data == {
+        "active_id": "b",
         "setups": [
             {"id": "a", "name": "First", "window_count": 1},
             {"id": "b", "name": "Second", "window_count": 0},
@@ -1254,57 +1342,82 @@ def test_list_setups_endpoint(fastapi_client):
     }
 
 
-def test_save_setup_endpoint(fastapi_client):
+def test_new_setup_endpoint_creates_and_activates(fastapi_client):
     client, service, calls = fastapi_client
-    calls["cfg"]["bridge"]["windows"] = [
-        {"id": "w1", "name": "Live", "region": [0, 0, 100, 100]},
-    ]
+    # Pre-seed an active setup with windows so we can verify the
+    # outgoing setup's windows get mirrored when we create a new one.
+    calls["cfg"] = press_store.normalize_config(
+        {
+            "bridge": {
+                "windows": [
+                    {"id": "w1", "name": "Live", "region": [0, 0, 100, 100]},
+                ],
+            }
+        }
+    )
+    prev_active = calls["cfg"]["bridge"]["active_setup_id"]
+
     res = client.post("/api/bridge/setups", json={"name": "From phone"})
     assert res.status_code == 200
     body = res.json()
     assert body["name"] == "From phone"
-    assert isinstance(body["id"], str)
-    # The cfg should now have the new setup.
-    setups = calls["cfg"]["bridge"]["setups"]
-    assert len(setups) == 1
-    assert setups[0]["name"] == "From phone"
+    assert body["active_id"] == body["id"]
+    # New setup is active and starts empty.
+    bridge = calls["cfg"]["bridge"]
+    assert bridge["active_setup_id"] == body["id"]
+    assert bridge["windows"] == []
+    # Previous active retained its mirrored windows.
+    prev = next(s for s in bridge["setups"] if s["id"] == prev_active)
+    assert prev["windows"][0]["name"] == "Live"
 
 
-def test_save_setup_endpoint_400_for_blank_name(fastapi_client):
+def test_new_setup_endpoint_400_for_blank_name(fastapi_client):
     client, service, calls = fastapi_client
     res = client.post("/api/bridge/setups", json={"name": "   "})
     assert res.status_code == 400
 
 
-def test_load_setup_endpoint(fastapi_client):
+def test_activate_setup_endpoint_swaps_live_windows(fastapi_client):
     client, service, calls = fastapi_client
-    calls["cfg"]["bridge"]["setups"] = [
+    calls["cfg"] = press_store.normalize_config(
         {
-            "id": "saved-1",
-            "name": "Stored",
-            "windows": [{"id": "w-old", "name": "From setup"}],
+            "bridge": {
+                "windows": [{"id": "w-live", "name": "Live"}],
+                "setups": [
+                    {
+                        "id": "other",
+                        "name": "Other",
+                        "windows": [{"id": "w-other", "name": "FromOther"}],
+                    }
+                ],
+            }
         }
-    ]
-    calls["cfg"]["bridge"]["windows"] = [{"id": "w-live", "name": "Live"}]
-    res = client.post("/api/bridge/setups/saved-1/load")
+    )
+    # After normalize: live "w-live" became a 'Current' setup, and
+    # 'other' is still in the list. Activate 'other'.
+    res = client.post("/api/bridge/setups/other/activate")
     assert res.status_code == 200
-    assert res.json()["loaded"] is True
-    # The setup's snapshot should now be in bridge.windows.
+    assert res.json()["active_id"] == "other"
     [w] = calls["cfg"]["bridge"]["windows"]
-    assert w["name"] == "From setup"
+    assert w["name"] == "FromOther"
 
 
-def test_load_setup_endpoint_404_unknown(fastapi_client):
+def test_activate_setup_endpoint_404_unknown(fastapi_client):
     client, service, calls = fastapi_client
-    res = client.post("/api/bridge/setups/no-such-id/load")
+    res = client.post("/api/bridge/setups/no-such-id/activate")
     assert res.status_code == 404
 
 
 def test_delete_setup_endpoint(fastapi_client):
     client, service, calls = fastapi_client
+    # Two setups so we can delete one without hitting the
+    # "auto-create new Default" path.
     calls["cfg"]["bridge"]["setups"] = [
         {"id": "doomed", "name": "Goes", "windows": []},
+        {"id": "keeper", "name": "Stays", "windows": []},
     ]
+    calls["cfg"]["bridge"]["active_setup_id"] = "keeper"
     res = client.delete("/api/bridge/setups/doomed")
     assert res.status_code == 200
-    assert calls["cfg"]["bridge"]["setups"] == []
+    [remaining] = calls["cfg"]["bridge"]["setups"]
+    assert remaining["id"] == "keeper"

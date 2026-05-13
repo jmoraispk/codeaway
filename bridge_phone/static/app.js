@@ -677,7 +677,15 @@ async function toggleNotifications() {
   renderNotifToggle();
 }
 
-// ---- Setups (saved window layouts) -------------------------------------
+// ---- Setups (named window layouts) -------------------------------------
+//
+// The active setup's windows ARE the live bridge.windows — every persist
+// on the desktop mirrors them back, so switching is non-destructive. The
+// phone UI is just three controls: the selector (changes = activate),
+// "New…" (creates a fresh empty setup), and ✕ (deletes the current one,
+// auto-falling-back to the first remaining or a new Default).
+
+let _currentActiveId = null;
 
 async function refreshSetups() {
   const select = $("setup-select");
@@ -688,10 +696,11 @@ async function refreshSetups() {
     const data = await res.json();
     select.innerHTML = "";
     const setups = data.setups || [];
+    _currentActiveId = data.active_id || null;
     if (setups.length === 0) {
       const opt = document.createElement("option");
       opt.value = "";
-      opt.textContent = "(no saved setups)";
+      opt.textContent = "(no setups)";
       opt.disabled = true;
       select.appendChild(opt);
       return;
@@ -700,49 +709,43 @@ async function refreshSetups() {
       const opt = document.createElement("option");
       opt.value = s.id;
       opt.textContent = `${s.name} · ${s.window_count} win`;
+      if (s.id === _currentActiveId) opt.selected = true;
       select.appendChild(opt);
     }
   } catch {}
 }
 
-async function loadSetup() {
+async function activateSetup() {
   const select = $("setup-select");
   if (!select || !select.value) return;
-  const name = select.options[select.selectedIndex].textContent;
-  if (!confirm(
-    `Replace your current windows with the saved layout from '${name}'?`
-  )) return;
-  const btn = $("setup-load-btn");
-  btn.disabled = true;
-  const original = btn.textContent;
-  btn.textContent = "Loading…";
+  const targetId = select.value;
+  if (targetId === _currentActiveId) return;
   try {
     const res = await fetch(
-      `/api/bridge/setups/${encodeURIComponent(select.value)}/load`,
+      `/api/bridge/setups/${encodeURIComponent(targetId)}/activate`,
       { method: "POST" }
     );
     if (!res.ok) {
       const detail = await res.text();
-      alert(`Load failed: ${res.status} ${detail}`);
+      alert(`Switch failed: ${res.status} ${detail}`);
+      // Roll the select back so the UI matches reality.
+      await refreshSetups();
+      return;
     }
+    _currentActiveId = targetId;
   } catch (e) {
-    alert(`Load network error: ${e.message}`);
+    alert(`Switch network error: ${e.message}`);
+    await refreshSetups();
   }
-  setTimeout(() => {
-    btn.disabled = false;
-    btn.textContent = original;
-  }, 600);
 }
 
-async function saveSetup() {
-  // prompt() is fine for a quick name — the phone's keyboard pops up
-  // and the user types. Empty / cancelled = no-op.
-  const name = (prompt("Name for this saved setup:") || "").trim();
+async function newSetup() {
+  const name = (prompt("Name for the new setup:") || "").trim();
   if (!name) return;
-  const btn = $("setup-save-btn");
+  const btn = $("setup-new-btn");
   btn.disabled = true;
   const original = btn.textContent;
-  btn.textContent = "Saving…";
+  btn.textContent = "Creating…";
   try {
     const res = await fetch("/api/bridge/setups", {
       method: "POST",
@@ -751,17 +754,40 @@ async function saveSetup() {
     });
     if (!res.ok) {
       const detail = await res.text();
-      alert(`Save failed: ${res.status} ${detail}`);
+      alert(`Create failed: ${res.status} ${detail}`);
     } else {
       await refreshSetups();
     }
   } catch (e) {
-    alert(`Save network error: ${e.message}`);
+    alert(`Create network error: ${e.message}`);
   }
   setTimeout(() => {
     btn.disabled = false;
     btn.textContent = original;
   }, 600);
+}
+
+async function deleteSetup() {
+  if (!_currentActiveId) return;
+  const select = $("setup-select");
+  const label = select && select.selectedOptions[0]
+    ? select.selectedOptions[0].textContent.split(" · ")[0]
+    : "this setup";
+  if (!confirm(`Delete the setup '${label}' and its windows?`)) return;
+  try {
+    const res = await fetch(
+      `/api/bridge/setups/${encodeURIComponent(_currentActiveId)}`,
+      { method: "DELETE" }
+    );
+    if (!res.ok) {
+      const detail = await res.text();
+      alert(`Delete failed: ${res.status} ${detail}`);
+      return;
+    }
+    await refreshSetups();
+  } catch (e) {
+    alert(`Delete network error: ${e.message}`);
+  }
 }
 
 async function autoDetectWindows() {
@@ -991,11 +1017,12 @@ $("notif-toggle").addEventListener("click", toggleNotifications);
 $("autoreload-toggle").addEventListener("click", toggleAutoReload);
 $("reload-btn").addEventListener("click", reloadBridge);
 $("auto-detect-btn").addEventListener("click", autoDetectWindows);
-$("setup-load-btn").addEventListener("click", loadSetup);
-$("setup-save-btn").addEventListener("click", saveSetup);
+$("setup-select").addEventListener("change", activateSetup);
+$("setup-new-btn").addEventListener("click", newSetup);
+$("setup-delete-btn").addEventListener("click", deleteSetup);
 // Refresh setup list when the settings drawer opens — keeps it
-// in sync after auto-detect adds a backup setup or the user does
-// a save/delete from the desktop.
+// in sync after the desktop / another client created or deleted
+// a setup.
 $("settings-btn").addEventListener("click", () => {
   if (!$("settings-panel").hidden) refreshSetups();
 });

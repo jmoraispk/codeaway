@@ -79,8 +79,14 @@ class BridgeCallbacks:
     auto_detect_windows: Optional[Callable[[str], int]] = None
     # Setup-management callbacks. Each mutates / reads bridge.setups
     # and bridge.windows under the desktop's cfg lock, then persists.
-    save_bridge_setup: Optional[Callable[[str], str]] = None
-    load_bridge_setup: Optional[Callable[[str], bool]] = None
+    # `new_bridge_setup`: create a fresh empty setup and activate it
+    # (returns the new id). `activate_bridge_setup`: switch the active
+    # setup; the previous active's windows are auto-mirrored so edits
+    # aren't lost. `delete_bridge_setup`: remove a setup; if it was
+    # active, the first remaining is activated (or a Default is created
+    # if none remain).
+    new_bridge_setup: Optional[Callable[[str], str]] = None
+    activate_bridge_setup: Optional[Callable[[str], bool]] = None
     delete_bridge_setup: Optional[Callable[[str], bool]] = None
 
 
@@ -843,13 +849,14 @@ def build_app(service: BridgeService):
 
     @app.get("/api/bridge/setups")
     async def list_setups() -> JSONResponse:
-        """Return the saved setups (id + name + window count). Live
-        windows aren't included here — they're already in /api/state."""
+        """Return all setups (id + name + window count) plus the
+        currently active setup id. Live windows are in /api/state."""
         cfg = service.callbacks.cfg_snapshot()
         bridge = cfg.get("bridge", {}) or {}
         setups = bridge.get("setups", []) or []
         return JSONResponse(
             {
+                "active_id": bridge.get("active_setup_id"),
                 "setups": [
                     {
                         "id": s.get("id"),
@@ -857,48 +864,53 @@ def build_app(service: BridgeService):
                         "window_count": len(s.get("windows", []) or []),
                     }
                     for s in setups
-                ]
+                ],
             }
         )
 
     @app.post("/api/bridge/setups")
-    async def save_setup(payload: dict) -> JSONResponse:
-        """Snapshot the live bridge.windows as a new named setup.
-        Body: ``{"name": "..."}``. Returns ``{"id": ..., "name": ...}``."""
+    async def new_setup_endpoint(payload: dict) -> JSONResponse:
+        """Create a fresh empty setup and activate it. The outgoing
+        setup's windows are auto-mirrored, then ``bridge.windows`` is
+        cleared. Body: ``{"name": "..."}``."""
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="name required")
         name = (payload.get("name") or "").strip()
         if not name:
             raise HTTPException(status_code=400, detail="name required")
-        if service.callbacks.save_bridge_setup is None:
-            raise HTTPException(status_code=501, detail="save not wired")
+        if service.callbacks.new_bridge_setup is None:
+            raise HTTPException(status_code=501, detail="new setup not wired")
         try:
-            sid = service.callbacks.save_bridge_setup(name)
+            sid = service.callbacks.new_bridge_setup(name)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return JSONResponse({"id": sid, "name": name})
+        for s in service.windows.summaries():
+            service.hub.publish_typed("window_state", s)
+        return JSONResponse({"id": sid, "name": name, "active_id": sid})
 
-    @app.post("/api/bridge/setups/{setup_id}/load")
-    async def load_setup_endpoint(setup_id: str) -> JSONResponse:
-        """Swap the live windows for the saved setup's snapshot. 404
-        if the id is unknown. Fans an SSE event so any connected phone
-        re-reads the window list within ~1 s."""
-        if service.callbacks.load_bridge_setup is None:
-            raise HTTPException(status_code=501, detail="load not wired")
+    @app.post("/api/bridge/setups/{setup_id}/activate")
+    async def activate_setup_endpoint(setup_id: str) -> JSONResponse:
+        """Switch the active setup. The previous active's windows are
+        auto-mirrored before the swap, so edits aren't lost. 404 if
+        the id is unknown. Fans an SSE event so connected phones
+        re-read the window list within ~1 s."""
+        if service.callbacks.activate_bridge_setup is None:
+            raise HTTPException(status_code=501, detail="activate not wired")
         try:
-            loaded = service.callbacks.load_bridge_setup(setup_id)
+            activated = service.callbacks.activate_bridge_setup(setup_id)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        if not loaded:
+        if not activated:
             raise HTTPException(status_code=404, detail="setup not found")
         for s in service.windows.summaries():
             service.hub.publish_typed("window_state", s)
-        return JSONResponse({"loaded": True, "setup_id": setup_id})
+        return JSONResponse({"active_id": setup_id})
 
     @app.delete("/api/bridge/setups/{setup_id}")
     async def delete_setup_endpoint(setup_id: str) -> JSONResponse:
-        """Remove a saved setup. Live windows aren't touched. 404 if
-        the id is unknown."""
+        """Remove a setup. If it was active, the first remaining is
+        activated (or a fresh Default is created if none remain).
+        404 if the id is unknown."""
         if service.callbacks.delete_bridge_setup is None:
             raise HTTPException(status_code=501, detail="delete not wired")
         try:
@@ -907,6 +919,10 @@ def build_app(service: BridgeService):
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         if not removed:
             raise HTTPException(status_code=404, detail="setup not found")
+        # Live windows may have changed (if we deleted the active setup),
+        # so fan an SSE event for the phone to re-read.
+        for s in service.windows.summaries():
+            service.hub.publish_typed("window_state", s)
         return JSONResponse({"deleted": True, "setup_id": setup_id})
 
     @app.post("/api/admin/auto_detect")

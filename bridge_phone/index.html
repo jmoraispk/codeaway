@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="stylesheet" href="/static/style.css?v=27">
+  <link rel="stylesheet" href="/static/style.css?v=28">
   <title>auto-press</title>
 </head>
 <body>
@@ -42,16 +42,18 @@
     </div>
     <div class="setting setup-row">
       <select id="setup-select" class="setup-select"></select>
-      <button id="setup-load-btn" class="ghost">Load</button>
-      <button id="setup-save-btn" class="ghost">Save…</button>
+      <button id="setup-new-btn" class="ghost">New…</button>
+      <button id="setup-delete-btn" class="ghost icon" aria-label="Delete current setup">✕</button>
     </div>
     <p class="muted setting-hint">
       Rules automation toggles the desktop Start button — pause auto-clicking
       while reading the agent's output, resume when done. Auto-refresh re-fetches
       window state on the bridge tick cadence (no page flash; backup for when
       SSE drops). Reload re-imports <code>press_bridge.py</code> and restarts
-      the listener. Auto-detect stashes your current layout as a backup setup
-      and adds detected windows on top — revert via the Setup dropdown.
+      the listener. Setup dropdown switches between named window layouts —
+      pick another to load it, "New…" creates a fresh empty setup, ✕ deletes
+      the current one. Auto-detect adds detected Cursor windows to the
+      current setup.
     </p>
   </section>
 
@@ -111,6 +113,6 @@
     <img id="lightbox-img" alt="">
   </div>
 
-  <script src="/static/app.js?v=27"></script>
+  <script src="/static/app.js?v=28"></script>
 </body>
 </html>

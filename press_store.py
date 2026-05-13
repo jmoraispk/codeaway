@@ -39,13 +39,13 @@ def default_rule(name: str = "New Rule") -> dict:
 
 
 def default_setup(name: str = "Default") -> dict:
-    """A named snapshot of bridge.windows the user can switch back to.
+    """A named window layout the user can switch between.
 
-    The user's live windows live in cfg['bridge']['windows']. Setups
-    are saved copies — explicit named backups that the user can switch
-    to at any time. Auto-detect / Replace flows stash a backup setup
-    automatically so the previous layout is one click away from being
-    restored.
+    Each setup owns its own windows list. The live ``bridge.windows``
+    is a working copy of the active setup's windows — every persist
+    mirrors it back into the active setup, so switching setups never
+    loses edits. There is always at least one setup, and exactly one
+    of them is active (``bridge.active_setup_id``).
     """
     return {
         "id": uuid.uuid4().hex[:8],
@@ -101,13 +101,17 @@ def default_bridge_config() -> dict:
         # Captured the same way as the idle template via the Bridge tab.
         "askuser_template_path": None,
         # Cursor windows the bridge watches; empty list = bridge has nothing
-        # useful to do. Each entry is a default_bridge_window() dict.
+        # useful to do. Each entry is a default_bridge_window() dict. This
+        # is a working copy of the active setup's windows — every save
+        # mirrors it back into the active setup so switching never loses
+        # edits.
         "windows": [],
-        # Saved layouts the user can switch between. Each entry is a
-        # default_setup() dict — id, name, and a snapshot of the
-        # windows list at save time. The live `windows` field above is
-        # the active layout; setups are explicit backups.
+        # Named layouts the user can switch between. Always at least one;
+        # exactly one is active. The active setup's id lives in
+        # ``active_setup_id``; its window list is mirrored into the
+        # ``windows`` field above on every persist.
         "setups": [],
+        "active_setup_id": None,
     }
 
 
@@ -294,7 +298,48 @@ def _normalize_bridge(bridge: dict | None) -> dict:
     raw_setups = bridge.get("setups")
     if isinstance(raw_setups, list):
         base["setups"] = [_normalize_setup(s) for s in raw_setups]
+    raw_active = bridge.get("active_setup_id")
+    if isinstance(raw_active, str) and raw_active.strip():
+        base["active_setup_id"] = raw_active.strip()
+    _ensure_active_setup(base)
     return base
+
+
+def _ensure_active_setup(bridge: dict) -> None:
+    """Guarantee bridge has at least one setup with a valid active id.
+
+    Migration paths:
+      - No setups, windows non-empty → wrap them in a "Default" setup.
+      - No setups, no windows → create empty "Default".
+      - Setups exist but active_setup_id is missing / stale → wrap the
+        current ``windows`` as a new "Current" setup so the user's live
+        view is preserved alongside existing saved layouts.
+    """
+    setups = bridge.setdefault("setups", [])
+    windows = bridge.setdefault("windows", [])
+    valid_ids = {s.get("id") for s in setups}
+    active_id = bridge.get("active_setup_id")
+    if active_id in valid_ids:
+        return
+    if not setups:
+        setup = default_setup("Default")
+        setup["windows"] = [dict(w) for w in windows]
+        setups.append(setup)
+        bridge["active_setup_id"] = setup["id"]
+        return
+    # Setups exist but none active. If live windows are non-empty,
+    # preserve them as a new "Current" setup so the user doesn't
+    # lose what they're looking at. Otherwise just activate the
+    # first existing setup.
+    if windows:
+        setup = default_setup("Current")
+        setup["windows"] = [dict(w) for w in windows]
+        setups.insert(0, setup)
+        bridge["active_setup_id"] = setup["id"]
+    else:
+        first = setups[0]
+        bridge["active_setup_id"] = first.get("id")
+        bridge["windows"] = [dict(w) for w in first.get("windows", [])]
 
 
 def normalize_config(config: dict | None) -> dict:
@@ -326,6 +371,7 @@ def load_config() -> dict:
 
 def save_config(config: dict) -> None:
     ensure_templates_dir()
+    sync_active_setup(config)
     normalized = normalize_config(config)
     CONFIG_PATH.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
 
@@ -375,43 +421,99 @@ def make_rule_summary(rule: dict, last_score: float | None = None) -> str:
     return f"{rule.get('priority', '?')}. {rule.get('name', 'Rule')} [{enabled}] {action} {scope} score={score}"
 
 
-# ---- Setups: named snapshots of the bridge's live windows list ------------
+# ---- Setups: active setup IS the live windows -----------------------------
+#
+# The active setup's windows ARE what bridge.windows reflects. Every save
+# mirrors bridge.windows back into the active setup so edits aren't lost
+# when switching. Activating a setup copies its windows in (after first
+# mirroring the outgoing setup's windows out). Creating / deleting setups
+# keeps the invariant "always at least one setup, exactly one active".
 
-def save_setup_from_current(cfg: dict, name: str) -> str:
-    """Snapshot the live bridge.windows as a new named setup. Returns
-    the new setup's id.
 
-    Deep-copies the windows so subsequent edits to bridge.windows don't
-    leak into the saved snapshot.
-    """
+def sync_active_setup(cfg: dict) -> None:
+    """Mirror the live ``bridge.windows`` into the active setup's
+    snapshot. Called from save_config and from setup-mutating helpers
+    before they switch active, so the outgoing setup is always
+    up-to-date with the latest edits."""
+    bridge = cfg.get("bridge")
+    if not isinstance(bridge, dict):
+        return
+    _ensure_active_setup(bridge)
+    active_id = bridge.get("active_setup_id")
+    if not active_id:
+        return
+    for s in bridge.get("setups", []) or []:
+        if s.get("id") == active_id:
+            s["windows"] = [dict(w) for w in (bridge.get("windows") or [])]
+            return
+
+
+def new_setup(cfg: dict, name: str) -> str:
+    """Create a fresh empty setup and activate it. Mirrors the outgoing
+    setup's windows first so its state is preserved, then clears
+    ``bridge.windows`` (the new setup starts empty). Returns the new
+    setup's id."""
     bridge = cfg.setdefault("bridge", default_bridge_config())
     bridge.setdefault("setups", [])
-    setup = default_setup(name)
-    setup["windows"] = [dict(w) for w in (bridge.get("windows") or [])]
+    sync_active_setup(cfg)
+    setup = default_setup(name or "Setup")
     bridge["setups"].append(setup)
+    bridge["active_setup_id"] = setup["id"]
+    bridge["windows"] = []
     return setup["id"]
 
 
-def load_setup(cfg: dict, setup_id: str) -> bool:
-    """Copy the named setup's windows into the live bridge.windows
-    list. Returns True if the setup was found, False otherwise. The
-    setup itself stays in the saved list — load is non-destructive
-    of the snapshot."""
-    bridge = cfg.get("bridge", {}) or {}
-    for s in bridge.get("setups", []) or []:
-        if s.get("id") == setup_id:
-            cfg["bridge"]["windows"] = [dict(w) for w in s.get("windows", [])]
-            return True
-    return False
+def activate_setup(cfg: dict, setup_id: str) -> bool:
+    """Switch the active setup. Mirrors the outgoing setup's windows
+    first (so edits to it aren't lost), then loads the incoming
+    setup's windows into ``bridge.windows``. Returns True if the id
+    was found, False otherwise (live state unchanged)."""
+    bridge = cfg.get("bridge")
+    if not isinstance(bridge, dict):
+        return False
+    target = next(
+        (s for s in bridge.get("setups", []) or [] if s.get("id") == setup_id),
+        None,
+    )
+    if target is None:
+        return False
+    if bridge.get("active_setup_id") == setup_id:
+        # Already active — still copy the snapshot into live windows
+        # in case they drifted (e.g. after a corrupt save).
+        bridge["windows"] = [dict(w) for w in target.get("windows", [])]
+        return True
+    sync_active_setup(cfg)
+    bridge["active_setup_id"] = setup_id
+    bridge["windows"] = [dict(w) for w in target.get("windows", [])]
+    return True
 
 
 def delete_setup(cfg: dict, setup_id: str) -> bool:
-    """Remove the named setup. Returns True if removed, False if not
-    found. Doesn't touch the live windows list."""
-    bridge = cfg.get("bridge", {}) or {}
+    """Remove a setup. If it was the active one, activate the first
+    remaining (or create a fresh empty Default if none remain) and
+    swap its windows into ``bridge.windows``. Returns True if removed,
+    False if the id was unknown."""
+    bridge = cfg.get("bridge")
+    if not isinstance(bridge, dict):
+        return False
     setups = bridge.get("setups", []) or []
-    for i, s in enumerate(setups):
-        if s.get("id") == setup_id:
-            setups.pop(i)
-            return True
-    return False
+    idx = next(
+        (i for i, s in enumerate(setups) if s.get("id") == setup_id),
+        None,
+    )
+    if idx is None:
+        return False
+    was_active = bridge.get("active_setup_id") == setup_id
+    setups.pop(idx)
+    if not was_active:
+        return True
+    if setups:
+        first = setups[0]
+        bridge["active_setup_id"] = first.get("id")
+        bridge["windows"] = [dict(w) for w in first.get("windows", [])]
+    else:
+        setup = default_setup("Default")
+        setups.append(setup)
+        bridge["active_setup_id"] = setup["id"]
+        bridge["windows"] = []
+    return True
