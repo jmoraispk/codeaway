@@ -77,6 +77,11 @@ class BridgeCallbacks:
     # bridge.windows in config. Returns the number of windows now in
     # the bridge config (or -1 on platform unsupported / no callback).
     auto_detect_windows: Optional[Callable[[str], int]] = None
+    # Setup-management callbacks. Each mutates / reads bridge.setups
+    # and bridge.windows under the desktop's cfg lock, then persists.
+    save_bridge_setup: Optional[Callable[[str], str]] = None
+    load_bridge_setup: Optional[Callable[[str], bool]] = None
+    delete_bridge_setup: Optional[Callable[[str], bool]] = None
 
 
 # ---- per-window state + snapshot ring buffer ----------------------------
@@ -835,6 +840,74 @@ def build_app(service: BridgeService):
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return JSONResponse({"reload_scheduled": True})
+
+    @app.get("/api/bridge/setups")
+    async def list_setups() -> JSONResponse:
+        """Return the saved setups (id + name + window count). Live
+        windows aren't included here — they're already in /api/state."""
+        cfg = service.callbacks.cfg_snapshot()
+        bridge = cfg.get("bridge", {}) or {}
+        setups = bridge.get("setups", []) or []
+        return JSONResponse(
+            {
+                "setups": [
+                    {
+                        "id": s.get("id"),
+                        "name": s.get("name"),
+                        "window_count": len(s.get("windows", []) or []),
+                    }
+                    for s in setups
+                ]
+            }
+        )
+
+    @app.post("/api/bridge/setups")
+    async def save_setup(payload: dict) -> JSONResponse:
+        """Snapshot the live bridge.windows as a new named setup.
+        Body: ``{"name": "..."}``. Returns ``{"id": ..., "name": ...}``."""
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="name required")
+        name = (payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name required")
+        if service.callbacks.save_bridge_setup is None:
+            raise HTTPException(status_code=501, detail="save not wired")
+        try:
+            sid = service.callbacks.save_bridge_setup(name)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse({"id": sid, "name": name})
+
+    @app.post("/api/bridge/setups/{setup_id}/load")
+    async def load_setup_endpoint(setup_id: str) -> JSONResponse:
+        """Swap the live windows for the saved setup's snapshot. 404
+        if the id is unknown. Fans an SSE event so any connected phone
+        re-reads the window list within ~1 s."""
+        if service.callbacks.load_bridge_setup is None:
+            raise HTTPException(status_code=501, detail="load not wired")
+        try:
+            loaded = service.callbacks.load_bridge_setup(setup_id)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if not loaded:
+            raise HTTPException(status_code=404, detail="setup not found")
+        for s in service.windows.summaries():
+            service.hub.publish_typed("window_state", s)
+        return JSONResponse({"loaded": True, "setup_id": setup_id})
+
+    @app.delete("/api/bridge/setups/{setup_id}")
+    async def delete_setup_endpoint(setup_id: str) -> JSONResponse:
+        """Remove a saved setup. Live windows aren't touched. 404 if
+        the id is unknown."""
+        if service.callbacks.delete_bridge_setup is None:
+            raise HTTPException(status_code=501, detail="delete not wired")
+        try:
+            removed = service.callbacks.delete_bridge_setup(setup_id)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if not removed:
+            raise HTTPException(status_code=404, detail="setup not found")
+        return JSONResponse({"deleted": True, "setup_id": setup_id})
 
     @app.post("/api/admin/auto_detect")
     async def admin_auto_detect(payload: dict) -> JSONResponse:

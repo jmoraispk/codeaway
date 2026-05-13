@@ -925,6 +925,10 @@ class MainWindow(QMainWindow):
     # The slot redraws the windows table and resets worker tracking on
     # the Qt main thread.
     bridge_windows_auto_detected = Signal(int)
+    # Fires after a phone-triggered setup load/save/delete mutates
+    # bridge.setups / bridge.windows. Slot refreshes the combo + the
+    # windows table on the main thread.
+    bridge_setups_changed_remote = Signal(str)  # action: "load"/"save"/"delete"
 
     CHROME_HEIGHT = 120
 
@@ -946,6 +950,9 @@ class MainWindow(QMainWindow):
         self.bridge_set_rules_requested.connect(self._set_rules_running_remote, Qt.QueuedConnection)
         self.bridge_windows_auto_detected.connect(
             self._on_bridge_windows_auto_detected, Qt.QueuedConnection,
+        )
+        self.bridge_setups_changed_remote.connect(
+            self._on_bridge_setups_changed_remote, Qt.QueuedConnection,
         )
         self.bridge_window_renamed_remote.connect(
             self._on_bridge_window_renamed_remote, Qt.QueuedConnection
@@ -1035,6 +1042,7 @@ class MainWindow(QMainWindow):
         self._refresh_rule_list(0 if self._cfg.get("rules") else None)
         self._refresh_bridge_template_view()
         self._refresh_bridge_windows_table()
+        self._refresh_bridge_setup_combo()
         self._set_running_status(False)
         self._log(f"[ready] loaded {CONFIG_PATH}")
         # Restore window geometry + splitter sizes + collapse states from
@@ -1674,6 +1682,32 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        # Setup row — sits above the windows table. The combo lists
+        # saved layouts; Save snapshots the current windows under a
+        # name; Load swaps the live list to the selected setup; the
+        # trash icon deletes a saved setup. Setups are what makes
+        # destructive ops (auto-detect, replace) safe — both the
+        # desktop and the phone stash a backup before they overwrite.
+        setup_row = QHBoxLayout()
+        setup_row.setSpacing(6)
+        setup_row.addWidget(BodyLabel("Setup:"))
+        self._bridge_setup_combo = ComboBox()
+        self._bridge_setup_combo.setMinimumWidth(180)
+        setup_row.addWidget(self._bridge_setup_combo, 1)
+        setup_load_btn = PushButton(FIF.SYNC, "Load")
+        setup_load_btn.setToolTip("Replace current windows with the selected setup")
+        setup_load_btn.clicked.connect(self._load_bridge_setup)
+        setup_row.addWidget(setup_load_btn)
+        setup_save_btn = PushButton(FIF.SAVE, "Save…")
+        setup_save_btn.setToolTip("Snapshot the current windows as a new named setup")
+        setup_save_btn.clicked.connect(self._save_bridge_setup)
+        setup_row.addWidget(setup_save_btn)
+        setup_del_btn = ToolButton(FIF.DELETE)
+        setup_del_btn.setToolTip("Delete the selected setup")
+        setup_del_btn.clicked.connect(self._delete_bridge_setup)
+        setup_row.addWidget(setup_del_btn)
+        win_body.addLayout(setup_row)
+
         win_body.addWidget(self._bridge_windows_table)
 
         add_row = QHBoxLayout()
@@ -1683,7 +1717,9 @@ class MainWindow(QMainWindow):
         auto_btn = PushButton(FIF.SEARCH, "Auto-detect")
         auto_btn.setToolTip(
             "Scan visible Cursor windows on this desktop via Win32 and "
-            "preview the result before adding them here."
+            "preview the result before adding them here. Replace mode "
+            "stashes the current windows as a 'Before auto-detect' "
+            "setup so you can revert in one click."
         )
         auto_btn.clicked.connect(self._auto_detect_bridge_windows)
         add_row.addWidget(auto_btn)
@@ -1978,6 +2014,120 @@ class MainWindow(QMainWindow):
             f"added '{name}' at ({bbox[0]},{bbox[1]}) {bbox[2]}×{bbox[3]}"
         )
 
+    def _refresh_bridge_setup_combo(self) -> None:
+        """Populate the setup combo from the current config. Called on
+        every config mutation that touches bridge.setups (load, save,
+        delete) and on initial UI build."""
+        combo = getattr(self, "_bridge_setup_combo", None)
+        if combo is None:
+            return
+        # Block signals while we reset the items so any currentIndex-
+        # changed listener doesn't fire spuriously.
+        combo.blockSignals(True)
+        combo.clear()
+        bridge = self._cfg.get("bridge", {}) or {}
+        setups = bridge.get("setups", []) or []
+        for s in setups:
+            label = f"{s.get('name', 'Setup')}  ·  {len(s.get('windows', []))} win"
+            combo.addItem(label, s.get("id"))
+        combo.blockSignals(False)
+
+    def _save_bridge_setup(self) -> None:
+        """Snapshot the current bridge.windows as a new named setup
+        the user can load later. No-op if cancelled."""
+        from PySide6.QtWidgets import QInputDialog
+
+        existing = (self._cfg.get("bridge", {}) or {}).get("setups", []) or []
+        suggested = f"Setup {len(existing) + 1}"
+        name, ok = QInputDialog.getText(
+            self,
+            "Save setup",
+            "Name this layout — you'll see it in the dropdown:",
+            text=suggested,
+        )
+        if not ok:
+            return
+        clean = (name or "").strip()
+        if not clean:
+            return
+        from press_store import save_setup_from_current
+
+        with self._cfg_lock:
+            save_setup_from_current(self._cfg, clean)
+        self._persist()
+        self._refresh_bridge_setup_combo()
+        # Select the new setup so the next Load click is a no-op
+        # rather than restoring some other layout.
+        combo = self._bridge_setup_combo
+        combo.setCurrentIndex(combo.count() - 1)
+        self._bridge_log(f"saved setup '{clean}'")
+
+    def _load_bridge_setup(self) -> None:
+        """Replace the live windows with the selected setup's windows.
+        Confirms first — Load is destructive of the current layout
+        (though the user can re-save it before clicking, or use
+        auto-detect's automatic backup behaviour)."""
+        combo = self._bridge_setup_combo
+        if combo.count() == 0 or combo.currentIndex() < 0:
+            return
+        sid = combo.currentData()
+        name = combo.currentText().split("·")[0].strip()
+        from PySide6.QtWidgets import QMessageBox
+
+        confirmed = QMessageBox.question(
+            self,
+            "Load setup",
+            f"Replace your current windows with the saved layout from '{name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirmed != QMessageBox.Yes:
+            return
+        from press_store import load_setup
+
+        with self._cfg_lock:
+            loaded = load_setup(self._cfg, sid)
+        if not loaded:
+            self._bridge_log(f"load setup: id {sid} not found")
+            return
+        self._persist()
+        self._refresh_bridge_windows_table()
+        # Loaded windows are new to the worker → reset tracking so the
+        # next tick treats each as first observation and captures a
+        # fresh snapshot.
+        self._worker.reset_window_tracking()
+        self._bridge_log(f"loaded setup '{name}'")
+
+    def _delete_bridge_setup(self) -> None:
+        """Remove the selected saved setup. Live windows are not
+        touched. Confirms first."""
+        combo = self._bridge_setup_combo
+        if combo.count() == 0 or combo.currentIndex() < 0:
+            return
+        sid = combo.currentData()
+        name = combo.currentText().split("·")[0].strip()
+        from PySide6.QtWidgets import QMessageBox
+
+        confirmed = QMessageBox.question(
+            self,
+            "Delete setup",
+            f"Delete the saved setup '{name}'? "
+            "(Your current windows aren't affected.)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirmed != QMessageBox.Yes:
+            return
+        from press_store import delete_setup
+
+        with self._cfg_lock:
+            removed = delete_setup(self._cfg, sid)
+        if not removed:
+            return
+        self._persist()
+        self._refresh_bridge_setup_combo()
+        self._bridge_log(f"deleted setup '{name}'")
+
     def _auto_detect_bridge_windows(self) -> None:
         """Run Win32 EnumWindows to find visible Cursor windows, show a
         small picker dialog, and either replace the current windows
@@ -2078,10 +2228,26 @@ class MainWindow(QMainWindow):
 
     def _apply_auto_detected(self, detected: list[dict], replace: bool) -> None:
         """Persist the detected windows into the bridge config. If
-        ``replace`` is True the existing list is wiped first; otherwise
-        the detected entries are appended (new uuid-based ids so they
-        never collide with the existing ones)."""
+        ``replace`` is True the existing list is wiped first; the
+        previous live windows get snapshotted as an auto-named setup
+        so the user can revert in one Load click. Append mode also
+        stashes a backup — cheap insurance, and the user can delete
+        any setups they don't want."""
+        from datetime import datetime as _dt
+
+        from press_store import save_setup_from_current
+
+        backup_name: Optional[str] = None
         with self._cfg_lock:
+            current = self._cfg.get("bridge", {}).get("windows", []) or []
+            if current:
+                ts = _dt.now().strftime("%Y-%m-%d %H:%M")
+                backup_name = (
+                    f"Before auto-detect {ts}"
+                    if replace
+                    else f"Before adding {ts}"
+                )
+                save_setup_from_current(self._cfg, backup_name)
             if replace:
                 self._cfg["bridge"]["windows"] = []
             existing = self._cfg["bridge"]["windows"]
@@ -2091,16 +2257,15 @@ class MainWindow(QMainWindow):
                 existing.append(win)
         self._persist()
         self._refresh_bridge_windows_table()
-        # Tracking dict is keyed by window id — replace mode invalidates
-        # all prior keys, append mode adds new ones the worker hasn't
-        # seen yet. Either way, the safe move is a full reset so the
-        # next tick captures fresh snapshots for everything.
+        self._refresh_bridge_setup_combo()
         self._worker.reset_window_tracking()
         verb = "replaced with" if replace else "added"
-        self._bridge_log(
-            f"auto-detect: {verb} {len(detected)} window"
-            f"{'s' if len(detected) != 1 else ''}"
-        )
+        msg = f"auto-detect: {verb} {len(detected)} window"
+        if len(detected) != 1:
+            msg += "s"
+        if backup_name:
+            msg += f" — previous layout saved as '{backup_name}'"
+        self._bridge_log(msg)
 
     def _find_window_index(self, window_id: str) -> Optional[int]:
         for idx, w in enumerate(self._cfg.get("bridge", {}).get("windows", [])):
@@ -3329,6 +3494,9 @@ class MainWindow(QMainWindow):
             set_rules_running=self._bridge_set_rules_running,
             rename_window=self._bridge_rename_window,
             auto_detect_windows=self._bridge_auto_detect_windows,
+            save_bridge_setup=self._bridge_save_setup,
+            load_bridge_setup=self._bridge_load_setup,
+            delete_bridge_setup=self._bridge_delete_setup,
         )
         self._bridge = BridgeService(callbacks)
         self._bridge.start(bridge_cfg)
@@ -3536,9 +3704,17 @@ class MainWindow(QMainWindow):
         enumeration here on the desktop side, mutates bridge.windows
         under the cfg lock, and returns the new window count. Returns
         -1 when nothing was detected (the endpoint maps that to a 400).
-        Qt widget refreshes are deferred to the Qt main thread via the
+
+        Safer than the previous "add" semantic: stashes the current
+        windows as a 'Before auto-detect <ts>' setup first, so the
+        user can revert in one Load click if the detection ends up
+        wrong (or the phone is a mile away from the laptop). Qt
+        widget refreshes are deferred to the main thread via the
         bridge_windows_auto_detected signal."""
+        from datetime import datetime as _dt
+
         from press_windows import list_cursor_windows
+        from press_store import save_setup_from_current
 
         try:
             detected = list_cursor_windows()
@@ -3549,6 +3725,11 @@ class MainWindow(QMainWindow):
         if mode not in ("add", "replace"):
             mode = "add"
         with self._cfg_lock:
+            current = self._cfg.get("bridge", {}).get("windows", []) or []
+            if current:
+                ts = _dt.now().strftime("%Y-%m-%d %H:%M")
+                tag = "Before auto-detect" if mode == "replace" else "Before adding"
+                save_setup_from_current(self._cfg, f"{tag} {ts}")
             if mode == "replace":
                 self._cfg["bridge"]["windows"] = []
             for d in detected:
@@ -3562,11 +3743,57 @@ class MainWindow(QMainWindow):
 
     def _on_bridge_windows_auto_detected(self, count: int) -> None:
         self._refresh_bridge_windows_table()
+        self._refresh_bridge_setup_combo()
         self._worker.reset_window_tracking()
         self._bridge_log(
             f"auto-detect via web → added {count} window"
             f"{'s' if count != 1 else ''}"
         )
+
+    def _bridge_save_setup(self, name: str) -> str:
+        """POST /api/bridge/setups → snapshot live windows under
+        ``name``, return the new setup id."""
+        from press_store import save_setup_from_current
+
+        with self._cfg_lock:
+            sid = save_setup_from_current(self._cfg, name)
+        self._persist()
+        self.bridge_setups_changed_remote.emit("save")
+        return sid
+
+    def _bridge_load_setup(self, setup_id: str) -> bool:
+        """POST /api/bridge/setups/{id}/load → swap live windows for
+        the saved snapshot. Returns False if id unknown."""
+        from press_store import load_setup
+
+        with self._cfg_lock:
+            loaded = load_setup(self._cfg, setup_id)
+        if not loaded:
+            return False
+        self._persist()
+        self.bridge_setups_changed_remote.emit("load")
+        return True
+
+    def _bridge_delete_setup(self, setup_id: str) -> bool:
+        from press_store import delete_setup
+
+        with self._cfg_lock:
+            removed = delete_setup(self._cfg, setup_id)
+        if not removed:
+            return False
+        self._persist()
+        self.bridge_setups_changed_remote.emit("delete")
+        return True
+
+    def _on_bridge_setups_changed_remote(self, action: str) -> None:
+        # Both save and delete only touch bridge.setups, so a table
+        # refresh isn't needed there. Load swaps bridge.windows so it
+        # does. Either way, refresh the combo + log.
+        self._refresh_bridge_setup_combo()
+        if action == "load":
+            self._refresh_bridge_windows_table()
+            self._worker.reset_window_tracking()
+        self._bridge_log(f"setup {action} via web")
 
     def _bridge_perform_window_send(
         self, window: dict, text: str, bridge_cfg: dict

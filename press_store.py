@@ -38,6 +38,22 @@ def default_rule(name: str = "New Rule") -> dict:
     }
 
 
+def default_setup(name: str = "Default") -> dict:
+    """A named snapshot of bridge.windows the user can switch back to.
+
+    The user's live windows live in cfg['bridge']['windows']. Setups
+    are saved copies — explicit named backups that the user can switch
+    to at any time. Auto-detect / Replace flows stash a backup setup
+    automatically so the previous layout is one click away from being
+    restored.
+    """
+    return {
+        "id": uuid.uuid4().hex[:8],
+        "name": name,
+        "windows": [],
+    }
+
+
 def default_bridge_window(name: str = "Cursor") -> dict:
     """A single Cursor window the bridge should monitor.
 
@@ -87,6 +103,11 @@ def default_bridge_config() -> dict:
         # Cursor windows the bridge watches; empty list = bridge has nothing
         # useful to do. Each entry is a default_bridge_window() dict.
         "windows": [],
+        # Saved layouts the user can switch between. Each entry is a
+        # default_setup() dict — id, name, and a snapshot of the
+        # windows list at save time. The live `windows` field above is
+        # the active layout; setups are explicit backups.
+        "setups": [],
     }
 
 
@@ -187,6 +208,24 @@ def _normalize_rule(rule: dict, priority: int) -> dict:
     return base
 
 
+def _normalize_setup(setup: dict | None) -> dict:
+    """Coerce an arbitrary dict into a valid setup. Missing / blank
+    fields fall back to defaults; the windows list is run through the
+    standard window normaliser so legacy saved setups load cleanly."""
+    base = default_setup()
+    if isinstance(setup, dict):
+        sid = setup.get("id")
+        if isinstance(sid, str) and sid.strip():
+            base["id"] = sid.strip()
+        name = setup.get("name")
+        if isinstance(name, str) and name.strip():
+            base["name"] = name.strip()
+        raw = setup.get("windows")
+        if isinstance(raw, list):
+            base["windows"] = [_normalize_window(w) for w in raw]
+    return base
+
+
 def _normalize_window(window: dict | None) -> dict:
     base = default_bridge_window()
     if isinstance(window, dict):
@@ -252,6 +291,9 @@ def _normalize_bridge(bridge: dict | None) -> dict:
     raw_windows = bridge.get("windows")
     if isinstance(raw_windows, list):
         base["windows"] = [_normalize_window(w) for w in raw_windows]
+    raw_setups = bridge.get("setups")
+    if isinstance(raw_setups, list):
+        base["setups"] = [_normalize_setup(s) for s in raw_setups]
     return base
 
 
@@ -331,3 +373,45 @@ def make_rule_summary(rule: dict, last_score: float | None = None) -> str:
     action = rule.get("action", ACTION_CLICK)
     score = "-" if last_score is None else f"{last_score:.3f}"
     return f"{rule.get('priority', '?')}. {rule.get('name', 'Rule')} [{enabled}] {action} {scope} score={score}"
+
+
+# ---- Setups: named snapshots of the bridge's live windows list ------------
+
+def save_setup_from_current(cfg: dict, name: str) -> str:
+    """Snapshot the live bridge.windows as a new named setup. Returns
+    the new setup's id.
+
+    Deep-copies the windows so subsequent edits to bridge.windows don't
+    leak into the saved snapshot.
+    """
+    bridge = cfg.setdefault("bridge", default_bridge_config())
+    bridge.setdefault("setups", [])
+    setup = default_setup(name)
+    setup["windows"] = [dict(w) for w in (bridge.get("windows") or [])]
+    bridge["setups"].append(setup)
+    return setup["id"]
+
+
+def load_setup(cfg: dict, setup_id: str) -> bool:
+    """Copy the named setup's windows into the live bridge.windows
+    list. Returns True if the setup was found, False otherwise. The
+    setup itself stays in the saved list — load is non-destructive
+    of the snapshot."""
+    bridge = cfg.get("bridge", {}) or {}
+    for s in bridge.get("setups", []) or []:
+        if s.get("id") == setup_id:
+            cfg["bridge"]["windows"] = [dict(w) for w in s.get("windows", [])]
+            return True
+    return False
+
+
+def delete_setup(cfg: dict, setup_id: str) -> bool:
+    """Remove the named setup. Returns True if removed, False if not
+    found. Doesn't touch the live windows list."""
+    bridge = cfg.get("bridge", {}) or {}
+    setups = bridge.get("setups", []) or []
+    for i, s in enumerate(setups):
+        if s.get("id") == setup_id:
+            setups.pop(i)
+            return True
+    return False

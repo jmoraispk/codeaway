@@ -677,6 +677,93 @@ async function toggleNotifications() {
   renderNotifToggle();
 }
 
+// ---- Setups (saved window layouts) -------------------------------------
+
+async function refreshSetups() {
+  const select = $("setup-select");
+  if (!select) return;
+  try {
+    const res = await fetch("/api/bridge/setups");
+    if (!res.ok) return;
+    const data = await res.json();
+    select.innerHTML = "";
+    const setups = data.setups || [];
+    if (setups.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "(no saved setups)";
+      opt.disabled = true;
+      select.appendChild(opt);
+      return;
+    }
+    for (const s of setups) {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = `${s.name} · ${s.window_count} win`;
+      select.appendChild(opt);
+    }
+  } catch {}
+}
+
+async function loadSetup() {
+  const select = $("setup-select");
+  if (!select || !select.value) return;
+  const name = select.options[select.selectedIndex].textContent;
+  if (!confirm(
+    `Replace your current windows with the saved layout from '${name}'?`
+  )) return;
+  const btn = $("setup-load-btn");
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Loading…";
+  try {
+    const res = await fetch(
+      `/api/bridge/setups/${encodeURIComponent(select.value)}/load`,
+      { method: "POST" }
+    );
+    if (!res.ok) {
+      const detail = await res.text();
+      alert(`Load failed: ${res.status} ${detail}`);
+    }
+  } catch (e) {
+    alert(`Load network error: ${e.message}`);
+  }
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.textContent = original;
+  }, 600);
+}
+
+async function saveSetup() {
+  // prompt() is fine for a quick name — the phone's keyboard pops up
+  // and the user types. Empty / cancelled = no-op.
+  const name = (prompt("Name for this saved setup:") || "").trim();
+  if (!name) return;
+  const btn = $("setup-save-btn");
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Saving…";
+  try {
+    const res = await fetch("/api/bridge/setups", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      alert(`Save failed: ${res.status} ${detail}`);
+    } else {
+      await refreshSetups();
+    }
+  } catch (e) {
+    alert(`Save network error: ${e.message}`);
+  }
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.textContent = original;
+  }, 600);
+}
+
 async function autoDetectWindows() {
   // Two confirms to make the destructive path opt-in: the first runs
   // an "add" pass (safe — appends to existing) on yes. We don't expose
@@ -904,6 +991,15 @@ $("notif-toggle").addEventListener("click", toggleNotifications);
 $("autoreload-toggle").addEventListener("click", toggleAutoReload);
 $("reload-btn").addEventListener("click", reloadBridge);
 $("auto-detect-btn").addEventListener("click", autoDetectWindows);
+$("setup-load-btn").addEventListener("click", loadSetup);
+$("setup-save-btn").addEventListener("click", saveSetup);
+// Refresh setup list when the settings drawer opens — keeps it
+// in sync after auto-detect adds a backup setup or the user does
+// a save/delete from the desktop.
+$("settings-btn").addEventListener("click", () => {
+  if (!$("settings-panel").hidden) refreshSetups();
+});
+refreshSetups();
 $("rules-toggle").addEventListener("click", toggleRules);
 for (const btn of document.querySelectorAll(".scroll-btn[data-amount]")) {
   const amount = Number(btn.dataset.amount || "1");
