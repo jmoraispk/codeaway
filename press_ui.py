@@ -2032,9 +2032,13 @@ class MainWindow(QMainWindow):
         setups = bridge.get("setups", []) or []
         active_id = bridge.get("active_setup_id")
         active_idx = 0
+        # qfluentwidgets ComboBox.addItem signature is (text, icon=None,
+        # userData=None). Passing the id positionally lands in `icon`,
+        # not userData, so itemData() returns None and the change
+        # handler bails out — keep the keyword explicit.
         for i, s in enumerate(setups):
             label = f"{s.get('name', 'Setup')}  ·  {len(s.get('windows', []))} win"
-            combo.addItem(label, s.get("id"))
+            combo.addItem(label, userData=s.get("id"))
             if s.get("id") == active_id:
                 active_idx = i
         if combo.count() > 0:
