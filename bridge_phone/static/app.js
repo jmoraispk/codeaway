@@ -1004,6 +1004,85 @@ async function scrollWindow(amount, btn) {
   }
 }
 
+// ---- Workspace switcher (Windows virtual desktops) ---------------------
+//
+// ◀ ▶ fire Ctrl+Win+Right / Left on the laptop; the desktop's COM
+// poll picks up the new workspace GUID and auto-activates the setup
+// bound to it (if any), and the SSE stream pushes us the new state.
+// 📌 binds the currently active setup to whichever workspace is in
+// front on the desktop right now.
+
+async function switchWorkspace(direction, btn) {
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add("loading");
+  }
+  try {
+    const res = await fetch("/api/bridge/workspace/switch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ direction }),
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      alert(`Workspace switch failed: ${res.status} ${detail}`);
+      return;
+    }
+    const data = await res.json();
+    updateWorkspaceLabel(data.workspace_id);
+    // If the desktop auto-activated a different setup, refresh our
+    // local setup state so the drawer's dropdown reflects it next
+    // time the user opens it. SSE will push the new windows.
+    if (data.active_setup_id) {
+      await refreshSetups();
+    }
+  } catch (e) {
+    alert(`Workspace switch network error: ${e.message}`);
+  } finally {
+    if (btn) {
+      // Give the desktop transition + state propagation ~500ms
+      // before re-enabling, so a fast double-tap doesn't skip two
+      // workspaces by accident.
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.classList.remove("loading");
+      }, 500);
+    }
+  }
+}
+
+async function bindWorkspace(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/bridge/workspace/bind", { method: "POST" });
+    if (!res.ok) {
+      const detail = await res.text();
+      alert(`Bind failed: ${res.status} ${detail}`);
+      return;
+    }
+    const data = await res.json();
+    updateWorkspaceLabel(data.workspace_id);
+    await refreshSetups();
+  } catch (e) {
+    alert(`Bind network error: ${e.message}`);
+  } finally {
+    if (btn) setTimeout(() => { btn.disabled = false; }, 400);
+  }
+}
+
+function updateWorkspaceLabel(wid) {
+  const label = $("ws-label");
+  if (!label) return;
+  if (!wid) {
+    label.textContent = "workspace";
+    return;
+  }
+  // The GUID is too long to read — show a short stable hash of it
+  // so the user can at least tell the workspace changed.
+  const tag = wid.replace(/[{}-]/g, "").slice(0, 6);
+  label.textContent = `workspace · ${tag}`;
+}
+
 renderNotifToggle();
 renderAutoReloadToggle();
 renderRulesToggle();
@@ -1020,6 +1099,9 @@ $("auto-detect-btn").addEventListener("click", autoDetectWindows);
 $("setup-select").addEventListener("change", activateSetup);
 $("setup-new-btn").addEventListener("click", newSetup);
 $("setup-delete-btn").addEventListener("click", deleteSetup);
+$("ws-prev").addEventListener("click", (e) => switchWorkspace("prev", e.currentTarget));
+$("ws-next").addEventListener("click", (e) => switchWorkspace("next", e.currentTarget));
+$("ws-bind").addEventListener("click", (e) => bindWorkspace(e.currentTarget));
 // Refresh setup list when the settings drawer opens — keeps it
 // in sync after the desktop / another client created or deleted
 // a setup.

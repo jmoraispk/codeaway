@@ -1421,3 +1421,85 @@ def test_delete_setup_endpoint(fastapi_client):
     assert res.status_code == 200
     [remaining] = calls["cfg"]["bridge"]["setups"]
     assert remaining["id"] == "keeper"
+
+
+# ---- Workspace binding ----------------------------------------------------
+
+def test_setup_normalize_preserves_workspace_id():
+    """A setup's workspace_id GUID survives a normalize round-trip;
+    a blank one is coerced to None."""
+    cfg = press_store.normalize_config(
+        {
+            "bridge": {
+                "setups": [
+                    {
+                        "id": "a",
+                        "name": "First",
+                        "windows": [],
+                        "workspace_id": "{aaaa1111-bbbb-2222-cccc-dddddddddddd}",
+                    },
+                    {"id": "b", "name": "Unbound", "windows": []},
+                    {"id": "c", "name": "Blank", "windows": [], "workspace_id": "   "},
+                ],
+            }
+        }
+    )
+    s_first, s_unbound, s_blank = cfg["bridge"]["setups"]
+    assert s_first["workspace_id"] == "{aaaa1111-bbbb-2222-cccc-dddddddddddd}"
+    assert s_unbound["workspace_id"] is None
+    assert s_blank["workspace_id"] is None
+
+
+def test_workspace_switch_endpoint_400_for_bad_direction(fastapi_client):
+    client, service, calls = fastapi_client
+    res = client.post("/api/bridge/workspace/switch", json={"direction": "diagonal"})
+    assert res.status_code == 400
+
+
+def test_workspace_switch_endpoint_501_when_unwired(fastapi_client):
+    client, service, calls = fastapi_client
+    # Strip the callback off the live service.
+    service.callbacks.workspace_switch = None
+    res = client.post("/api/bridge/workspace/switch", json={"direction": "next"})
+    assert res.status_code == 501
+
+
+def test_workspace_switch_endpoint_calls_callback(fastapi_client):
+    client, service, calls = fastapi_client
+
+    def fake_switch(direction):
+        calls.setdefault("workspace_switches", []).append(direction)
+        return {
+            "workspace_id": "{1111-2222-3333-4444-555555555555}",
+            "active_setup_id": "abc",
+        }
+
+    service.callbacks.workspace_switch = fake_switch
+    res = client.post("/api/bridge/workspace/switch", json={"direction": "next"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["workspace_id"] == "{1111-2222-3333-4444-555555555555}"
+    assert body["active_setup_id"] == "abc"
+    assert calls["workspace_switches"] == ["next"]
+
+
+def test_workspace_bind_endpoint_501_when_unwired(fastapi_client):
+    client, service, calls = fastapi_client
+    service.callbacks.workspace_bind_active = None
+    res = client.post("/api/bridge/workspace/bind")
+    assert res.status_code == 501
+
+
+def test_workspace_bind_endpoint_400_when_id_unreadable(fastapi_client):
+    client, service, calls = fastapi_client
+    service.callbacks.workspace_bind_active = lambda: None
+    res = client.post("/api/bridge/workspace/bind")
+    assert res.status_code == 400
+
+
+def test_workspace_bind_endpoint_returns_guid(fastapi_client):
+    client, service, calls = fastapi_client
+    service.callbacks.workspace_bind_active = lambda: "{abcd-1234}"
+    res = client.post("/api/bridge/workspace/bind")
+    assert res.status_code == 200
+    assert res.json() == {"workspace_id": "{abcd-1234}"}

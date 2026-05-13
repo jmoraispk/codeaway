@@ -87,6 +87,43 @@ button.icon {
   color: #fff;
   font-weight: 600;
 }
+/* Workspace bar — Windows virtual-desktop switcher pinned above
+   the windows list. ◀ ▶ trigger the same Ctrl+Win+Right/Left
+   shortcut the user would press on the laptop; bound setups then
+   swap in automatically. 📌 binds the active setup to whichever
+   workspace is currently in front. */
+.workspace-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 6px 8px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+}
+.workspace-bar .ws-arrow {
+  flex: 0 0 auto;
+  min-width: 44px;
+  padding: 6px 10px;
+  font-size: 16px;
+  line-height: 1;
+}
+.workspace-bar .ws-label {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-bar .ws-bind {
+  flex: 0 0 auto;
+  min-width: 36px;
+  padding: 6px 8px;
+  font-size: 14px;
+}
+
 /* Setup row: dropdown takes the flex slack, two action buttons sit
    on the right. Different from a regular .setting because there's
    no label — the dropdown self-describes. */

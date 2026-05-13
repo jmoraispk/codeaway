@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="stylesheet" href="/static/style.css?v=28">
+  <link rel="stylesheet" href="/static/style.css?v=29">
   <title>auto-press</title>
 </head>
 <body>
@@ -59,6 +59,12 @@
 
   <main>
     <section id="windows-section">
+      <div id="workspace-bar" class="workspace-bar">
+        <button id="ws-prev" class="ghost ws-arrow" aria-label="Previous workspace">◀</button>
+        <span id="ws-label" class="ws-label muted">workspace</span>
+        <button id="ws-next" class="ghost ws-arrow" aria-label="Next workspace">▶</button>
+        <button id="ws-bind" class="ghost ws-bind" title="Bind the current setup to this workspace">📌</button>
+      </div>
       <ul id="windows" aria-label="Cursor windows"></ul>
       <p id="empty-hint" class="muted" hidden>
         No windows yet. Open the desktop app, switch to the Bridge tab, capture
@@ -113,6 +119,6 @@
     <img id="lightbox-img" alt="">
   </div>
 
-  <script src="/static/app.js?v=28"></script>
+  <script src="/static/app.js?v=29"></script>
 </body>
 </html>

@@ -1028,6 +1028,16 @@ class MainWindow(QMainWindow):
         self._countdown_timer.timeout.connect(self._update_countdown)
         self._countdown_timer.start()
 
+        # Workspace poll — checks the foreground virtual desktop GUID
+        # every 1.5 s. If it changed and a setup is bound to the new
+        # workspace, that setup is auto-activated. The COM call is
+        # cheap (~few ms) and gracefully no-ops on non-Windows.
+        self._last_seen_workspace_id: Optional[str] = None
+        self._workspace_timer = QTimer(self)
+        self._workspace_timer.setInterval(1500)
+        self._workspace_timer.timeout.connect(self._poll_workspace)
+        self._workspace_timer.start()
+
         # Hotkey
         self._hotkey_vk = int(self._cfg.get("hotkey_vk", 0x22))
         self._hotkey_mods = int(self._cfg.get("hotkey_mods", 0))
@@ -1705,6 +1715,15 @@ class MainWindow(QMainWindow):
         )
         setup_new_btn.clicked.connect(self._new_bridge_setup)
         setup_row.addWidget(setup_new_btn)
+        setup_bind_btn = ToolButton(FIF.PIN)
+        setup_bind_btn.setToolTip(
+            "Bind the active setup to the current Windows virtual "
+            "desktop. Switching to that workspace later (via "
+            "Ctrl+Win+Right / Left, or the phone's ◀ ▶ buttons) "
+            "auto-activates this setup."
+        )
+        setup_bind_btn.clicked.connect(self._bind_active_setup_to_workspace)
+        setup_row.addWidget(setup_bind_btn)
         setup_del_btn = ToolButton(FIF.DELETE)
         setup_del_btn.setToolTip("Delete the current setup")
         setup_del_btn.clicked.connect(self._delete_bridge_setup)
@@ -2037,7 +2056,11 @@ class MainWindow(QMainWindow):
         # not userData, so itemData() returns None and the change
         # handler bails out — keep the keyword explicit.
         for i, s in enumerate(setups):
-            label = f"{s.get('name', 'Setup')}  ·  {len(s.get('windows', []))} win"
+            pin = " 📌" if s.get("workspace_id") else ""
+            label = (
+                f"{s.get('name', 'Setup')}{pin}  ·  "
+                f"{len(s.get('windows', []))} win"
+            )
             combo.addItem(label, userData=s.get("id"))
             if s.get("id") == active_id:
                 active_idx = i
@@ -2133,6 +2156,77 @@ class MainWindow(QMainWindow):
         self._refresh_bridge_windows_table()
         self._worker.reset_window_tracking()
         self._bridge_log(f"deleted setup '{name}'")
+
+    def _bind_active_setup_to_workspace(self) -> None:
+        """Stamp the current Windows virtual-desktop GUID onto the
+        active setup's ``workspace_id``. After binding, any future
+        switch to this workspace auto-activates the setup."""
+        import press_workspace as wsmod
+
+        wid = wsmod.current_id()
+        if not wid:
+            self._bridge_log(
+                "bind workspace: couldn't read current workspace GUID "
+                "(non-Windows, or COM call failed)"
+            )
+            return
+        bridge = self._cfg.get("bridge", {}) or {}
+        active_id = bridge.get("active_setup_id")
+        if not active_id:
+            return
+        with self._cfg_lock:
+            for s in self._cfg["bridge"].get("setups", []) or []:
+                if s.get("id") == active_id:
+                    s["workspace_id"] = wid
+                    name = s.get("name", "Setup")
+                    break
+            else:
+                return
+        self._persist()
+        # Remember so the poll loop doesn't immediately re-activate
+        # (this *is* the workspace the setup just got bound to).
+        self._last_seen_workspace_id = wid
+        self._refresh_bridge_setup_combo()
+        self._bridge_log(f"bound '{name}' to current workspace")
+
+    def _poll_workspace(self) -> None:
+        """Detect virtual-desktop switches and auto-activate the
+        setup bound to the new workspace. Fires every 1.5 s; cheap
+        no-op when nothing changed or no setup is bound."""
+        import press_workspace as wsmod
+
+        wid = wsmod.current_id()
+        if not wid or wid == self._last_seen_workspace_id:
+            return
+        self._last_seen_workspace_id = wid
+        bridge = self._cfg.get("bridge", {}) or {}
+        if bridge.get("active_setup_id") is None:
+            return
+        match = next(
+            (
+                s
+                for s in (bridge.get("setups") or [])
+                if s.get("workspace_id") == wid
+            ),
+            None,
+        )
+        if match is None:
+            return
+        if match.get("id") == bridge.get("active_setup_id"):
+            return
+        from press_store import activate_setup
+
+        with self._cfg_lock:
+            ok = activate_setup(self._cfg, match["id"])
+        if not ok:
+            return
+        self._persist()
+        self._refresh_bridge_setup_combo()
+        self._refresh_bridge_windows_table()
+        self._worker.reset_window_tracking()
+        self._bridge_log(
+            f"workspace changed → activated setup '{match.get('name', 'Setup')}'"
+        )
 
     def _auto_detect_bridge_windows(self) -> None:
         """Run Win32 EnumWindows to find visible Cursor windows, show a
@@ -3487,6 +3581,8 @@ class MainWindow(QMainWindow):
             new_bridge_setup=self._bridge_new_setup,
             activate_bridge_setup=self._bridge_activate_setup,
             delete_bridge_setup=self._bridge_delete_setup,
+            workspace_switch=self._bridge_workspace_switch,
+            workspace_bind_active=self._bridge_workspace_bind_active,
         )
         self._bridge = BridgeService(callbacks)
         self._bridge.start(bridge_cfg)
@@ -3775,6 +3871,66 @@ class MainWindow(QMainWindow):
         self._refresh_bridge_windows_table()
         self._worker.reset_window_tracking()
         self._bridge_log(f"setup {action} via web")
+
+    def _bridge_workspace_switch(self, direction: str) -> dict:
+        """POST /api/bridge/workspace/switch — fires Ctrl+Win+Right
+        (next) or Ctrl+Win+Left (prev), waits for the transition,
+        then activates the setup bound to the new workspace if any.
+        Returns a dict with the new workspace_id and active setup id."""
+        import press_workspace as wsmod
+        from press_store import activate_setup
+
+        if direction == "next":
+            wsmod.switch_next()
+        else:
+            wsmod.switch_prev()
+        new_wid = wsmod.current_id()
+        # Update the desktop's cached last-seen id so the polling
+        # timer doesn't double-fire the activation log when it next
+        # ticks. Atomic attribute write — safe from this thread.
+        self._last_seen_workspace_id = new_wid
+        activated_id: Optional[str] = None
+        if new_wid:
+            with self._cfg_lock:
+                bridge = self._cfg.get("bridge", {}) or {}
+                match = next(
+                    (
+                        s
+                        for s in (bridge.get("setups") or [])
+                        if s.get("workspace_id") == new_wid
+                    ),
+                    None,
+                )
+                if match and match.get("id") != bridge.get("active_setup_id"):
+                    if activate_setup(self._cfg, match["id"]):
+                        activated_id = match["id"]
+            if activated_id is not None:
+                self._persist()
+                self.bridge_setups_changed_remote.emit("workspace-switch")
+        return {"workspace_id": new_wid, "active_setup_id": activated_id}
+
+    def _bridge_workspace_bind_active(self) -> Optional[str]:
+        """POST /api/bridge/workspace/bind — stamp the current
+        workspace's GUID onto the active setup. Returns the GUID."""
+        import press_workspace as wsmod
+
+        wid = wsmod.current_id()
+        if not wid:
+            return None
+        with self._cfg_lock:
+            active_id = self._cfg.get("bridge", {}).get("active_setup_id")
+            if not active_id:
+                return None
+            for s in self._cfg["bridge"].get("setups", []) or []:
+                if s.get("id") == active_id:
+                    s["workspace_id"] = wid
+                    break
+            else:
+                return None
+        self._persist()
+        self._last_seen_workspace_id = wid
+        self.bridge_setups_changed_remote.emit("workspace-bind")
+        return wid
 
     def _bridge_perform_window_send(
         self, window: dict, text: str, bridge_cfg: dict

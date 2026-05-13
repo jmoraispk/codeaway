@@ -88,6 +88,15 @@ class BridgeCallbacks:
     new_bridge_setup: Optional[Callable[[str], str]] = None
     activate_bridge_setup: Optional[Callable[[str], bool]] = None
     delete_bridge_setup: Optional[Callable[[str], bool]] = None
+    # Windows virtual-desktop (workspace) callbacks.
+    # `workspace_switch(direction)`: fires Ctrl+Win+Right/Left, waits
+    #   for settle, then activates the setup bound to the new
+    #   workspace (if any). Returns a dict with the new workspace_id
+    #   and the activated setup_id.
+    # `workspace_bind_active`: stamps the current workspace's GUID
+    #   onto the active setup's ``workspace_id`` field.
+    workspace_switch: Optional[Callable[[str], dict]] = None
+    workspace_bind_active: Optional[Callable[[], Optional[str]]] = None
 
 
 # ---- per-window state + snapshot ring buffer ----------------------------
@@ -924,6 +933,48 @@ def build_app(service: BridgeService):
         for s in service.windows.summaries():
             service.hub.publish_typed("window_state", s)
         return JSONResponse({"deleted": True, "setup_id": setup_id})
+
+    @app.post("/api/bridge/workspace/switch")
+    async def workspace_switch_endpoint(payload: dict) -> JSONResponse:
+        """Switch the Windows virtual desktop. Body: ``{"direction":
+        "next" | "prev"}``. Fires Ctrl+Win+Right or Ctrl+Win+Left,
+        waits for the desktop transition animation, then activates
+        the setup bound to the new workspace (if any).
+
+        Returns ``{"workspace_id": str, "active_setup_id": str|None}``."""
+        direction = (payload or {}).get("direction")
+        if direction not in ("next", "prev"):
+            raise HTTPException(
+                status_code=400, detail="direction must be 'next' or 'prev'"
+            )
+        if service.callbacks.workspace_switch is None:
+            raise HTTPException(status_code=501, detail="workspace switch not wired")
+        try:
+            result = service.callbacks.workspace_switch(direction)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        for s in service.windows.summaries():
+            service.hub.publish_typed("window_state", s)
+        return JSONResponse(result or {})
+
+    @app.post("/api/bridge/workspace/bind")
+    async def workspace_bind_endpoint() -> JSONResponse:
+        """Bind the active setup to the current Windows virtual
+        desktop. After binding, future switches to this workspace
+        auto-activate the setup. Returns ``{"workspace_id": str}``
+        or 400 if the workspace GUID can't be read."""
+        if service.callbacks.workspace_bind_active is None:
+            raise HTTPException(status_code=501, detail="workspace bind not wired")
+        try:
+            wid = service.callbacks.workspace_bind_active()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if not wid:
+            raise HTTPException(
+                status_code=400,
+                detail="couldn't read current workspace (non-Windows or COM failed)",
+            )
+        return JSONResponse({"workspace_id": wid})
 
     @app.post("/api/admin/auto_detect")
     async def admin_auto_detect(payload: dict) -> JSONResponse:

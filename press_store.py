@@ -46,11 +46,18 @@ def default_setup(name: str = "Default") -> dict:
     mirrors it back into the active setup, so switching setups never
     loses edits. There is always at least one setup, and exactly one
     of them is active (``bridge.active_setup_id``).
+
+    ``workspace_id`` (optional) is the Windows virtual-desktop GUID
+    string this setup is bound to. When the foreground workspace
+    changes, the bridge auto-activates the setup whose ``workspace_id``
+    matches — so each virtual desktop can have its own set of
+    Cursor windows.
     """
     return {
         "id": uuid.uuid4().hex[:8],
         "name": name,
         "windows": [],
+        "workspace_id": None,
     }
 
 
@@ -227,6 +234,9 @@ def _normalize_setup(setup: dict | None) -> dict:
         raw = setup.get("windows")
         if isinstance(raw, list):
             base["windows"] = [_normalize_window(w) for w in raw]
+        wid = setup.get("workspace_id")
+        if isinstance(wid, str) and wid.strip():
+            base["workspace_id"] = wid.strip()
     return base
 
 
