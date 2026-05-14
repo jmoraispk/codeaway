@@ -178,6 +178,55 @@ def monitor_info_for_region(region: Optional[list | tuple]) -> Optional[dict]:
     return monitor_info_for_point(x + w // 2, y + h // 2)
 
 
+def all_monitor_infos() -> list[dict]:
+    """Per-monitor ``{rect, scale, key}`` for every attached display.
+
+    Used by the rule matcher to capture each monitor independently and
+    pick the right DPI variant per screen — the only way to match a
+    template captured at 150 % on a window that's been moved to a
+    100 % monitor (and vice versa). Empty list on non-Windows."""
+    if not IS_WINDOWS:
+        return []
+    infos: list[dict] = []
+    try:
+        MONITORENUMPROC = ctypes.WINFUNCTYPE(
+            c_int, HMONITOR, c_void_p, ctypes.POINTER(RECT), c_void_p
+        )
+
+        def _cb(hmon, hdc, lprc, lparam):
+            try:
+                info = _MONITORINFO()
+                info.cbSize = ctypes.sizeof(_MONITORINFO)
+                if _GetMonitorInfoW(hmon, byref(info)):
+                    rc = info.rcMonitor
+                    rect = (
+                        int(rc.left),
+                        int(rc.top),
+                        int(rc.right - rc.left),
+                        int(rc.bottom - rc.top),
+                    )
+                    dpi_x = c_uint(96)
+                    dpi_y = c_uint(96)
+                    scale = 1.0
+                    if (
+                        _GetDpiForMonitor(
+                            hmon, _MDT_EFFECTIVE_DPI, byref(dpi_x), byref(dpi_y)
+                        )
+                        == 0
+                    ):
+                        scale = _round_to_supported(dpi_x.value / 96.0)
+                    infos.append({"rect": rect, "scale": scale, "key": rect})
+            except Exception:
+                pass
+            return 1  # continue enumeration
+
+        _user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(_cb), 0)
+    except Exception as exc:
+        LOG.warning("all_monitor_infos failed: %s", exc)
+        return []
+    return infos
+
+
 def all_monitor_scales() -> Tuple[float, ...]:
     """Distinct DPI scales across all attached monitors, deduped and
     sorted. Useful for the test/verify flow: "make sure variants

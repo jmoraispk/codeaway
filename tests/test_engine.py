@@ -31,6 +31,77 @@ def test_pick_template_from_pack_falls_through_to_base_for_legacy_capture():
     assert press_engine._pick_template_from_pack(pack, 1.5) is base
 
 
+def test_is_dpi_aware_pack_distinguishes_legacy_from_fresh():
+    """The per-monitor matching path only fires for packs with real
+    DPI metadata. Legacy captures (no source_dpi) keep using the
+    cheaper single-virtual-screen frame."""
+    assert press_engine._is_dpi_aware_pack({"source_dpi": 1.5, "variants": {1.5: object()}}) is True
+    assert press_engine._is_dpi_aware_pack({"source_dpi": None, "variants": {}}) is False
+    assert press_engine._is_dpi_aware_pack(None) is False
+    assert press_engine._is_dpi_aware_pack({}) is False
+
+
+def test_find_rule_matches_uses_per_monitor_when_dpi_aware_and_unbounded(monkeypatch):
+    """A template rule with a DPI-aware pack and no search_region
+    must go through the per-monitor pipeline — that's the fix for
+    'captured a button on screen A, moved window to screen B and
+    matching stopped working'."""
+    called: dict = {"per_monitor": False, "frame": None}
+
+    def fake_per_monitor(rule, cache=None):
+        called["per_monitor"] = True
+        called["cache"] = cache
+        return [(0.97, (1348, -266))]
+
+    monkeypatch.setattr(
+        press_engine, "_find_template_matches_per_monitor", fake_per_monitor
+    )
+
+    rule = {
+        "matcher": "template",
+        "search_region": None,
+        "threshold": 0.9,
+        "template_gray": object(),
+        "template_pack": {
+            "base": object(),
+            "variants": {1.0: object(), 1.5: object()},
+            "source_dpi": 1.5,
+        },
+    }
+    matches = press_engine.find_rule_matches(object(), rule)
+    assert called["per_monitor"] is True
+    assert matches == [(0.97, (1348, -266))]
+
+
+def test_find_rule_matches_skips_per_monitor_for_legacy_unbounded_rule(monkeypatch):
+    """A legacy template (no source_dpi) keeps using the cached
+    virtual-screen frame — no regression in CPU cost for users who
+    haven't re-captured."""
+    called = {"per_monitor": False}
+
+    def fake_per_monitor(rule, cache=None):
+        called["per_monitor"] = True
+        return []
+
+    monkeypatch.setattr(
+        press_engine, "_find_template_matches_per_monitor", fake_per_monitor
+    )
+    monkeypatch.setattr(
+        press_engine, "_find_matches_in", lambda *args, **kwargs: [(0.5, (1, 2))]
+    )
+    monkeypatch.setattr(press_engine, "_virtual_screen_origin", lambda: (0, 0))
+
+    rule = {
+        "matcher": "template",
+        "search_region": None,
+        "threshold": 0.9,
+        "template_gray": object(),
+        "template_pack": {"base": object(), "variants": {}, "source_dpi": None},
+    }
+    press_engine.find_rule_matches(object(), rule)
+    assert called["per_monitor"] is False
+
+
 def test_evaluate_rules_returns_all_matches(monkeypatch):
     runtime_rules = [
         {"id": "a", "name": "Rule A", "threshold": 0.9},

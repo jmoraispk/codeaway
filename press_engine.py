@@ -251,6 +251,65 @@ def _find_color_matches(
     return [(1.0, center) for _, center in survivors[:COLOR_MAX_CLICKS]]
 
 
+def _is_dpi_aware_pack(pack) -> bool:
+    """A pack only deserves the per-monitor path if it actually has
+    DPI metadata. Legacy captures (no source_dpi, empty variants)
+    should keep matching against the cached virtual-screen frame."""
+    return bool(pack) and pack.get("source_dpi") is not None
+
+
+def _find_template_matches_per_monitor(
+    runtime_rule: dict,
+    monitor_cache: dict | None = None,
+) -> list[tuple[float, tuple[int, int]]]:
+    """DPI-aware template matching across all attached monitors.
+
+    For each monitor: pick the variant matching that monitor's scale,
+    capture the monitor's region, run matchTemplate. Aggregate
+    matches across monitors and sort by score desc. ``monitor_cache``
+    (when provided) is a dict ``{monitor_key: gray_frame}`` shared
+    across rules in the same tick so we only capture each monitor
+    once per evaluate_rules pass — same trick as the legacy
+    ``shared_gray`` cache, just keyed per monitor."""
+    import press_dpi as _dpi
+
+    pack = runtime_rule["template_pack"]
+    threshold = float(runtime_rule.get("threshold", 0.90))
+    monitors = _dpi.all_monitor_infos()
+    if not monitors:
+        # No DPI service available — fall back to the legacy path so
+        # callers still get some answer. _find_matches_in handles a
+        # missing template gracefully via the size guard.
+        return _find_matches_in(
+            capture_screen_gray(),
+            runtime_rule["template_gray"],
+            threshold,
+            *_virtual_screen_origin(),
+        )
+    all_matches: list[tuple[float, tuple[int, int]]] = []
+    for info in monitors:
+        rect = info["rect"]
+        key = info["key"]
+        gray = None
+        if monitor_cache is not None and key in monitor_cache:
+            gray = monitor_cache[key]
+        if gray is None:
+            try:
+                gray = capture_screen_gray(rect)
+            except Exception:
+                continue
+            if monitor_cache is not None:
+                monitor_cache[key] = gray
+        tpl = _pick_template_from_pack(pack, info["scale"])
+        if tpl is None:
+            continue
+        all_matches.extend(
+            _find_matches_in(gray, tpl, threshold, rect[0], rect[1])
+        )
+    all_matches.sort(key=lambda m: m[0], reverse=True)
+    return all_matches
+
+
 def find_rule_matches(frame, runtime_rule: dict) -> list[tuple[float, tuple[int, int]]]:
     """Evaluate one rule.
 
@@ -280,34 +339,40 @@ def find_rule_matches(frame, runtime_rule: dict) -> list[tuple[float, tuple[int,
         )
 
     # template
+    pack = runtime_rule.get("template_pack")
     if region:
         search_gray = capture_screen_gray(region)
         offset_x, offset_y = int(region[0]), int(region[1])
-    else:
-        if frame is None:
-            frame = capture_screen_gray()
-        search_gray = frame
-        offset_x, offset_y = _virtual_screen_origin()
-    # Pick the DPI variant matching the search region's monitor. With
-    # no search_region we'd be matching across the full virtual screen
-    # (possibly spanning monitors at different scales) — there's no
-    # single right answer, so we fall back to the captured base. Users
-    # who want DPI-aware matching on multi-monitor setups should set a
-    # search_region on the target monitor.
-    pack = runtime_rule.get("template_pack")
-    if pack and region:
-        import press_dpi as _dpi
+        # Pick the variant matching the region's monitor — DPI is
+        # unambiguous when the search is bounded to one monitor.
+        if pack:
+            import press_dpi as _dpi
 
-        scale = _dpi.scale_for_region(region)
-        template_gray = _pick_template_from_pack(pack, scale)
-    else:
-        template_gray = runtime_rule["template_gray"]
+            scale = _dpi.scale_for_region(region)
+            template_gray = _pick_template_from_pack(pack, scale)
+        else:
+            template_gray = runtime_rule["template_gray"]
+        return _find_matches_in(
+            search_gray,
+            template_gray,
+            float(runtime_rule.get("threshold", 0.90)),
+            offset_x,
+            offset_y,
+        )
+
+    # No search_region — DPI-aware path iterates monitors so a button
+    # captured on screen A at 150 % still matches on screen B at 100 %.
+    # Legacy captures (no source_dpi) keep the single-virtual-screen
+    # match against ``frame`` for back-compat.
+    if _is_dpi_aware_pack(pack):
+        return _find_template_matches_per_monitor(runtime_rule)
+    if frame is None:
+        frame = capture_screen_gray()
     return _find_matches_in(
-        search_gray,
-        template_gray,
+        frame,
+        runtime_rule["template_gray"],
         float(runtime_rule.get("threshold", 0.90)),
-        offset_x,
-        offset_y,
+        *_virtual_screen_origin(),
     )
 
 
@@ -322,26 +387,36 @@ def evaluate_rules(runtime_rules: list[dict]) -> tuple[list[dict], list[dict]]:
     if not runtime_rules:
         return [], []
     # Only pay for the full-virtual-screen grab if at least one rule needs it.
-    # Color rules want RGB, template rules want gray; lazily compute either.
+    # Color rules want RGB, template rules (legacy) want gray; DPI-aware
+    # template rules want one capture per monitor — that cache is keyed
+    # by monitor rect and shared across rules in this tick.
     shared_rgb = None
     shared_gray = None
+    shared_per_monitor: dict = {}
     results: list[dict] = []
     actions: list[dict] = []
 
     for rule in runtime_rules:
         matcher = rule.get("matcher", MATCHER_TEMPLATE)
-        if not rule.get("search_region"):
-            if matcher == MATCHER_COLOR:
-                if shared_rgb is None:
-                    shared_rgb = capture_screen_rgb()
-                shared = shared_rgb
-            else:
-                if shared_gray is None:
-                    shared_gray = capture_screen_gray()
-                shared = shared_gray
+        pack = rule.get("template_pack")
+        if rule.get("search_region"):
+            # Rule has its own region — find_rule_matches captures it.
+            matches = find_rule_matches(None, rule)
+        elif matcher == MATCHER_COLOR:
+            if shared_rgb is None:
+                shared_rgb = capture_screen_rgb()
+            matches = find_rule_matches(shared_rgb, rule)
+        elif _is_dpi_aware_pack(pack):
+            # DPI-aware template rules go through the per-monitor
+            # pipeline. They re-use ``shared_per_monitor`` so multiple
+            # such rules in a single tick only pay for K monitor
+            # captures (not N rules × K monitors).
+            matches = _find_template_matches_per_monitor(rule, shared_per_monitor)
         else:
-            shared = None  # find_rule_matches captures its own region
-        matches = find_rule_matches(shared, rule)
+            # Legacy template rule with no DPI metadata.
+            if shared_gray is None:
+                shared_gray = capture_screen_gray()
+            matches = find_rule_matches(shared_gray, rule)
         best_score = matches[0][0] if matches else 0.0
         results.append(
             {
