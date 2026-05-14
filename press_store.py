@@ -442,12 +442,46 @@ def load_config() -> dict:
         cfg = default_config()
         if seed_defaults_if_blank(cfg):
             save_config(cfg)
-        return normalize_config(cfg)
+        cfg = normalize_config(cfg)
+        _self_heal_template_bundles(cfg)
+        return cfg
     try:
         loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         return default_config()
-    return normalize_config(loaded)
+    cfg = normalize_config(loaded)
+    _self_heal_template_bundles(cfg)
+    return cfg
+
+
+def _self_heal_template_bundles(cfg: dict) -> None:
+    """Restore template base files that were orphaned by older
+    Rename / Delete code paths. A missing base + surviving variants
+    used to silently break detection (engine loaded an empty pack);
+    now we copy a variant back over the base on load so matching
+    works again without user intervention."""
+    for rule in cfg.get("rules", []) or []:
+        ref = rule.get("template_path")
+        if not ref:
+            continue
+        p = resolve_template_path(ref)
+        if p is None:
+            continue
+        restore_missing_template_base(p, rule.get("template_source_dpi"))
+        regenerate_missing_variants(p, rule.get("template_source_dpi"))
+    bridge = cfg.get("bridge") or {}
+    for path_key, dpi_key in [
+        ("idle_template_path", "idle_template_source_dpi"),
+        ("askuser_template_path", "askuser_template_source_dpi"),
+    ]:
+        ref = bridge.get(path_key)
+        if not ref:
+            continue
+        p = resolve_template_path(ref)
+        if p is None:
+            continue
+        restore_missing_template_base(p, bridge.get(dpi_key))
+        regenerate_missing_variants(p, bridge.get(dpi_key))
 
 
 def save_config(config: dict) -> None:
@@ -587,32 +621,197 @@ def _read_defaults_manifest() -> dict | None:
         return None
 
 
+def iter_template_bundle(base_path: Path) -> list[Path]:
+    """Every file that belongs to a template's bundle: the base PNG
+    plus any ``<base>.dpi<n>.<ext>`` variants sitting next to it.
+    Order: base first, then variants in filesystem order. Files that
+    don't exist are skipped — caller gets only what's actually on
+    disk."""
+    base = Path(base_path)
+    out: list[Path] = []
+    if base.exists():
+        out.append(base)
+    if not base.parent.exists():
+        return out
+    stem = base.stem
+    suffix = base.suffix.lower()
+    for sibling in base.parent.iterdir():
+        if not sibling.is_file() or sibling == base:
+            continue
+        if not sibling.name.startswith(stem + ".dpi"):
+            continue
+        if sibling.suffix.lower() != suffix:
+            continue
+        out.append(sibling)
+    return out
+
+
+def rename_template_bundle(old_base: Path, new_base: Path) -> int:
+    """Rename a template's full bundle — the base PNG plus every
+    DPI variant — atomically (best-effort). Returns the count of
+    files renamed. Used by the desktop Rename Template button so a
+    rename doesn't orphan variants."""
+    old_base = Path(old_base)
+    new_base = Path(new_base)
+    if not old_base.exists() and not any(
+        f for f in iter_template_bundle(old_base) if f != old_base
+    ):
+        return 0
+    new_base.parent.mkdir(parents=True, exist_ok=True)
+    old_stem = old_base.stem
+    new_stem = new_base.stem
+    suffix = new_base.suffix or old_base.suffix
+    renamed = 0
+    # Snapshot the bundle BEFORE we start moving, so a rename that
+    # would shadow another sibling can't race itself.
+    bundle = iter_template_bundle(old_base)
+    for src in bundle:
+        # base file → new base
+        if src == old_base:
+            dst = new_base
+        else:
+            # variant: replace stem, keep .dpi<n>.<ext> tail
+            tail = src.name[len(old_stem):]  # ".dpi150.png"
+            dst = new_base.with_name(new_stem + tail)
+        if dst.exists() and dst != src:
+            continue  # don't clobber a same-named target
+        src.rename(dst)
+        renamed += 1
+    return renamed
+
+
+def delete_template_bundle(base_path: Path) -> int:
+    """Delete a template's full bundle. Returns the count of files
+    removed. Mirrors ``rename_template_bundle`` so the desktop
+    Delete button doesn't leave orphans."""
+    removed = 0
+    for f in iter_template_bundle(Path(base_path)):
+        try:
+            f.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def regenerate_missing_variants(base_path: Path, source_dpi: float | None) -> int:
+    """If the template's base PNG is present and ``source_dpi`` is
+    known, generate any DPI variants that aren't already on disk by
+    resizing the base. Used by the self-heal to recover from a
+    rename that left variants orphaned under the old name. Returns
+    the count of variants written (0 if nothing to do)."""
+    if source_dpi is None:
+        return 0
+    base = Path(base_path)
+    if not base.exists():
+        return 0
+    missing = [
+        s for s in SUPPORTED_DPI_SCALES
+        if not dpi_variant_path(base, s).exists()
+    ]
+    if not missing:
+        return 0
+    try:
+        import numpy as np
+        from PIL import Image
+    except Exception:
+        return 0
+    try:
+        arr = np.array(Image.open(base).convert("RGB"))
+    except Exception:
+        return 0
+    try:
+        # Reuse the same writer that capture uses — it handles the
+        # base + every preset variant in one shot. Pass only the
+        # missing scales as targets so we don't rewrite existing
+        # variants and bump their mtimes.
+        write_template_with_dpi_variants(
+            base, arr, float(source_dpi), target_scales=tuple(missing)
+        )
+        return len(missing)
+    except Exception:
+        return 0
+
+
+def restore_missing_template_base(base_path: Path, source_dpi: float | None) -> bool:
+    """If a template's base PNG is missing but its source-DPI variant
+    exists, copy the variant back as the base. Used as a self-heal on
+    load_config: previous Rename / Delete bugs orphaned variants,
+    leaving the base file gone — the matcher then loaded nothing and
+    detection silently stopped working.
+
+    Returns True if the base was restored, False if it was already
+    present or no usable variant exists."""
+    import shutil
+
+    base = Path(base_path)
+    if base.exists():
+        return False
+    if source_dpi is None:
+        # No DPI metadata — pick any variant we can find as a last
+        # resort, so the matcher at least has SOMETHING to compare
+        # against until the user re-captures.
+        candidates = iter_template_bundle(base)
+        if not candidates:
+            return False
+        src = candidates[0]
+    else:
+        src = dpi_variant_path(base, float(source_dpi))
+        if not src.exists():
+            # source_dpi variant missing too — fall back to any
+            # variant. Better matching at the wrong scale than no
+            # matching at all.
+            candidates = iter_template_bundle(base)
+            if not candidates:
+                return False
+            src = candidates[0]
+    try:
+        shutil.copy2(src, base)
+        return True
+    except OSError:
+        return False
+
+
 def _copy_template_bundle(src_base: Path, dst_base: Path) -> int:
     """Copy ``src_base`` plus every DPI variant sitting next to it
     (``<base>.dpi<n>.<ext>``) into ``dst_base`` and its siblings.
-    Used by the seed and the pack tool. Returns the file count
-    copied; 0 if the base doesn't exist."""
+    Used by the seed and the pack tool.
+
+    Tolerates a missing base: if only variants exist, the first
+    variant found is also copied as the destination base so the
+    bundle stays usable (matching engine needs the base for the
+    legacy / no-DPI-metadata path). Returns the file count copied;
+    0 if neither base nor variants exist."""
     import shutil
 
-    if not src_base.exists():
-        return 0
     dst_base.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src_base, dst_base)
-    written = 1
+    written = 0
+    base_written = False
     src_stem = src_base.stem
     src_suffix = src_base.suffix
-    for sibling in src_base.parent.iterdir():
+    if src_base.exists():
+        shutil.copy2(src_base, dst_base)
+        written += 1
+        base_written = True
+    if not src_base.parent.exists():
+        return written
+    variants_seen: list[Path] = []
+    for sibling in sorted(src_base.parent.iterdir()):
         if not sibling.is_file() or sibling == src_base:
             continue
         if not sibling.name.startswith(src_stem + ".dpi"):
             continue
         if sibling.suffix.lower() != src_suffix.lower():
             continue
-        # Variant filename in dst: replace dst's stem with the source
-        # variant's stem (preserves the `.dpi<n>` suffix on the
-        # variant side regardless of what the dst base is named).
+        variants_seen.append(sibling)
         variant_suffix = sibling.name[len(src_stem):]  # ".dpi100.png"
         shutil.copy2(sibling, dst_base.with_name(dst_base.stem + variant_suffix))
+        written += 1
+    # Heal: if the source base was missing but variants existed,
+    # also drop a copy at the destination base so the engine's
+    # bundle loader doesn't trip on the missing base in the dst.
+    if not base_written and variants_seen:
+        shutil.copy2(variants_seen[0], dst_base)
         written += 1
     return written
 
@@ -635,19 +834,9 @@ def seed_defaults_if_blank(cfg: dict) -> bool:
 
     if not cfg.get("rules"):
         for entry in manifest.get("rules", []) or []:
-            filename = entry.get("template_filename")
-            if not filename:
-                continue
-            src = DEFAULTS_DIR / filename
-            dst = TEMPLATES_DIR / filename
-            if _copy_template_bundle(src, dst) == 0:
-                continue  # bundle missing the actual PNG — skip
+            matcher = entry.get("matcher")
             rule = default_rule(entry.get("name") or "New Rule")
-            rule["matcher"] = entry.get("matcher", MATCHER_TEMPLATE)
-            rule["template_path"] = filename
-            rule["template_source_dpi"] = _normalize_dpi(
-                entry.get("template_source_dpi")
-            )
+            rule["enabled"] = bool(entry.get("enabled", True))
             rule["action"] = (
                 entry["action"] if entry.get("action") in ACTION_TYPES else ACTION_CLICK
             )
@@ -655,6 +844,37 @@ def seed_defaults_if_blank(cfg: dict) -> bool:
                 rule["text"] = entry["text"]
             rule["threshold"] = _clamp_float(
                 entry.get("threshold"), 0.90, 0.0, 1.0
+            )
+            if matcher == MATCHER_COLOR:
+                # Color rules don't need a template file — just the
+                # RGB + capture area carry forward from the manifest.
+                rgb = entry.get("color_rgb")
+                if not _valid_rgb(rgb):
+                    continue
+                rule["matcher"] = MATCHER_COLOR
+                rule["color_rgb"] = [int(c) for c in rgb]
+                rule["color_name"] = entry.get("color_name") or ""
+                try:
+                    rule["color_capture_area"] = max(
+                        0, int(entry.get("color_capture_area") or 0)
+                    )
+                except (TypeError, ValueError):
+                    rule["color_capture_area"] = 0
+                cfg.setdefault("rules", []).append(rule)
+                seeded = True
+                continue
+            # Template rule.
+            filename = entry.get("template_filename")
+            if not filename:
+                continue
+            src = DEFAULTS_DIR / filename
+            dst = TEMPLATES_DIR / filename
+            if _copy_template_bundle(src, dst) == 0:
+                continue  # bundle missing the actual PNG — skip
+            rule["matcher"] = MATCHER_TEMPLATE
+            rule["template_path"] = filename
+            rule["template_source_dpi"] = _normalize_dpi(
+                entry.get("template_source_dpi")
             )
             cfg.setdefault("rules", []).append(rule)
             seeded = True

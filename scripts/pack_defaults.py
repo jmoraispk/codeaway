@@ -89,32 +89,53 @@ def pack(cfg: dict, defaults_dir: Path = ps.DEFAULTS_DIR) -> dict:
 
     manifest_rules: list[dict] = []
     for rule in cfg.get("rules", []) or []:
-        if not rule.get("enabled"):
-            continue
-        if rule.get("matcher") != ps.MATCHER_TEMPLATE:
-            continue
-        template_ref = rule.get("template_path")
-        if not template_ref:
-            continue
-        src = ps.resolve_template_path(template_ref)
-        if src is None or not src.exists():
-            print(f"  *skip rule '{rule.get('name')}': template file missing")
-            continue
-        stem = _sanitise_filename(rule.get("name", "rule"), fallback="rule")
-        dst_filename = _unique_filename(stem, src.suffix)
-        _, count = _pack_template(src, defaults_dir, dst_filename)
-        entry = {
+        matcher = rule.get("matcher")
+        common = {
             "name": rule.get("name") or "Rule",
-            "matcher": ps.MATCHER_TEMPLATE,
-            "template_filename": dst_filename,
-            "template_source_dpi": rule.get("template_source_dpi"),
+            "enabled": bool(rule.get("enabled", True)),
+            "matcher": matcher,
             "action": rule.get("action", ps.ACTION_CLICK),
             "threshold": rule.get("threshold", 0.90),
         }
         if rule.get("action") == ps.ACTION_CLICK_TYPE_ENTER:
-            entry["text"] = rule.get("text", "continue")
-        manifest_rules.append(entry)
-        print(f"  *packed rule '{entry['name']}' ->{dst_filename} ({count} files)")
+            common["text"] = rule.get("text", "continue")
+        if matcher == ps.MATCHER_COLOR:
+            # Color rules don't need a template file — the RGB +
+            # capture area in the manifest is enough to seed them.
+            if not rule.get("color_rgb"):
+                print(f"  *skip rule '{rule.get('name')}': color rule with no RGB captured")
+                continue
+            common.update(
+                {
+                    "color_rgb": [int(c) for c in rule["color_rgb"]],
+                    "color_name": rule.get("color_name", ""),
+                    "color_capture_area": int(rule.get("color_capture_area") or 0),
+                }
+            )
+            manifest_rules.append(common)
+            print(f"  *packed color rule '{common['name']}' (enabled={common['enabled']})")
+            continue
+        if matcher != ps.MATCHER_TEMPLATE:
+            continue
+        template_ref = rule.get("template_path")
+        if not template_ref:
+            print(f"  *skip rule '{rule.get('name')}': no template_path")
+            continue
+        src = ps.resolve_template_path(template_ref)
+        if src is None or not (src.exists() or ps.iter_template_bundle(src)):
+            print(f"  *skip rule '{rule.get('name')}': template file + variants both missing")
+            continue
+        stem = _sanitise_filename(rule.get("name", "rule"), fallback="rule")
+        dst_filename = _unique_filename(stem, src.suffix)
+        _, count = _pack_template(src, defaults_dir, dst_filename)
+        common.update(
+            {
+                "template_filename": dst_filename,
+                "template_source_dpi": rule.get("template_source_dpi"),
+            }
+        )
+        manifest_rules.append(common)
+        print(f"  *packed rule '{common['name']}' -> {dst_filename} ({count} files, enabled={common['enabled']})")
 
     bridge_cfg = cfg.get("bridge", {}) or {}
     bridge_manifest: dict = {}

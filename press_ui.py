@@ -1644,6 +1644,16 @@ class MainWindow(QMainWindow):
         )
         capture_ask_btn.clicked.connect(self._capture_bridge_askuser_template)
         ask_row.addWidget(capture_ask_btn)
+        # Same Test runner as the idle row — it reports both states
+        # per window (idle, asking, busy) so the button on either row
+        # gives the same useful answer.
+        test_ask_btn = PushButton(FIF.PLAY, "Test")
+        test_ask_btn.setToolTip(
+            "Run detection across all configured windows now — surfaces "
+            "both idle and asking verdicts per window."
+        )
+        test_ask_btn.clicked.connect(self._test_bridge_idle_match)
+        ask_row.addWidget(test_ask_btn)
         ask_row.addStretch(1)
         tpl_body.addLayout(ask_row)
 
@@ -3048,10 +3058,14 @@ class MainWindow(QMainWindow):
         new_path = template_asset_path(new_name)
         if new_path.exists():
             self._log(f"[template] '{new_name}' already exists; pick another name"); return
+        from press_store import rename_template_bundle
+
         try:
-            old_path.rename(new_path)
+            count = rename_template_bundle(old_path, new_path)
         except OSError as exc:
             self._log(f"[error] rename failed: {exc}"); return
+        if count == 0:
+            self._log(f"[template] nothing to rename for '{choice}'"); return
         # Re-point every rule that referenced the old filename.
         with self._cfg_lock:
             for r in self._cfg.get("rules", []):
@@ -3060,7 +3074,7 @@ class MainWindow(QMainWindow):
         self._persist()
         self._refresh_template_choices(new_name)
         self._refresh_rule_list(self._current_rule_index())
-        self._log(f"[template] renamed {choice} -> {new_name}")
+        self._log(f"[template] renamed {choice} -> {new_name} ({count} files)")
 
     def _delete_selected_template(self) -> None:
         choice = (self._template_combo.currentText() or "").strip()
@@ -3078,11 +3092,14 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
         path = template_asset_path(choice)
+        from press_store import delete_template_bundle
+
         try:
-            if path.exists():
-                path.unlink()
+            removed = delete_template_bundle(path)
         except OSError as exc:
             self._log(f"[error] delete failed: {exc}"); return
+        if removed == 0:
+            self._log(f"[template] no files to delete for '{choice}'"); return
         # Detach the deleted file from every rule that referenced it.
         with self._cfg_lock:
             for r in self._cfg.get("rules", []):
@@ -3091,7 +3108,7 @@ class MainWindow(QMainWindow):
         self._persist()
         self._refresh_template_choices()
         self._refresh_rule_list(self._current_rule_index())
-        self._log(f"[template] deleted {choice}")
+        self._log(f"[template] deleted {choice} ({removed} files)")
 
     def _selected_library_color(self) -> Optional[tuple[int, int, int]]:
         """Return the RGB tuple currently picked in the color library combo."""

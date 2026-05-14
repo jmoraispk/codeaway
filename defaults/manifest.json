@@ -1,0 +1,43 @@
+{
+  "rules": [
+    {
+      "name": "\"yes\" to all",
+      "enabled": true,
+      "matcher": "template",
+      "action": "click",
+      "threshold": 0.9,
+      "template_filename": "yes_to_all.png",
+      "template_source_dpi": 1.0
+    },
+    {
+      "name": "\"go on\" if idle",
+      "enabled": false,
+      "matcher": "template",
+      "action": "click+type+enter",
+      "threshold": 0.9,
+      "text": "continue",
+      "template_filename": "go_on_if_idle.png",
+      "template_source_dpi": null
+    },
+    {
+      "name": "click-color",
+      "enabled": false,
+      "matcher": "color",
+      "action": "click",
+      "threshold": 0.9,
+      "color_rgb": [
+        131,
+        161,
+        191
+      ],
+      "color_name": "runblue",
+      "color_capture_area": 17661
+    }
+  ],
+  "bridge": {
+    "idle_template_filename": "cursor_idle.png",
+    "idle_template_source_dpi": 1.0,
+    "askuser_template_filename": "cursor_askuser.png",
+    "askuser_template_source_dpi": 1.0
+  }
+}
