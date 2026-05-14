@@ -1,3 +1,5 @@
+import json
+
 import press_store
 
 
@@ -151,6 +153,128 @@ def test_is_dpi_variant_file_recognises_pattern():
     assert not press_store.is_dpi_variant_file("not_a_dpi_file.png")
     # Bare 'dpi' without digits is fine — only digit suffix matters.
     assert not press_store.is_dpi_variant_file("rule_dpi.png")
+
+
+def test_seed_defaults_silently_skips_when_bundle_missing(tmp_path, monkeypatch):
+    """No defaults/manifest.json on disk → seed is a no-op so the
+    app boots normally in dev / on the user's machine when the
+    bundle hasn't been packed yet."""
+    monkeypatch.setattr(press_store, "DEFAULTS_DIR", tmp_path / "nope")
+    monkeypatch.setattr(
+        press_store, "DEFAULTS_MANIFEST_PATH", tmp_path / "nope" / "manifest.json"
+    )
+    monkeypatch.setattr(press_store, "TEMPLATES_DIR", tmp_path / "templates")
+    cfg = press_store.default_config()
+    assert press_store.seed_defaults_if_blank(cfg) is False
+    assert cfg["rules"] == []
+
+
+def test_seed_defaults_creates_rules_and_copies_templates(tmp_path, monkeypatch):
+    """A populated defaults/manifest.json with PNG bundles seeds
+    rules + bridge templates and copies every DPI variant alongside
+    the base file into templates/."""
+    import numpy as np
+    from PIL import Image
+
+    defaults = tmp_path / "defaults"
+    templates = tmp_path / "templates"
+    defaults.mkdir(parents=True)
+    monkeypatch.setattr(press_store, "DEFAULTS_DIR", defaults)
+    monkeypatch.setattr(
+        press_store, "DEFAULTS_MANIFEST_PATH", defaults / "manifest.json"
+    )
+    monkeypatch.setattr(press_store, "TEMPLATES_DIR", templates)
+
+    # Write a "yes_button" bundle: base PNG + 2 DPI variants.
+    img = Image.fromarray(np.full((20, 20, 3), 200, dtype=np.uint8), "RGB")
+    img.save(defaults / "yes_button.png")
+    img.save(defaults / "yes_button.dpi100.png")
+    img.save(defaults / "yes_button.dpi150.png")
+    # And a bridge idle template.
+    img.save(defaults / "cursor_idle.png")
+    img.save(defaults / "cursor_idle.dpi150.png")
+
+    (defaults / "manifest.json").write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "name": "Click Yes",
+                        "matcher": "template",
+                        "template_filename": "yes_button.png",
+                        "template_source_dpi": 1.0,
+                        "action": "click",
+                        "threshold": 0.9,
+                    }
+                ],
+                "bridge": {
+                    "idle_template_filename": "cursor_idle.png",
+                    "idle_template_source_dpi": 1.5,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = press_store.default_config()
+    assert press_store.seed_defaults_if_blank(cfg) is True
+    [rule] = cfg["rules"]
+    assert rule["name"] == "Click Yes"
+    assert rule["template_path"] == "yes_button.png"
+    assert rule["template_source_dpi"] == 1.0
+    assert cfg["bridge"]["idle_template_path"] == "cursor_idle.png"
+    assert cfg["bridge"]["idle_template_source_dpi"] == 1.5
+    # The base + every variant got copied into templates/.
+    assert (templates / "yes_button.png").exists()
+    assert (templates / "yes_button.dpi100.png").exists()
+    assert (templates / "yes_button.dpi150.png").exists()
+    assert (templates / "cursor_idle.png").exists()
+    assert (templates / "cursor_idle.dpi150.png").exists()
+
+
+def test_seed_defaults_skips_already_populated_slots(tmp_path, monkeypatch):
+    """If the user already has rules / bridge templates, seed never
+    overwrites them. The whole point is 'first-run only'."""
+    import numpy as np
+    from PIL import Image
+
+    defaults = tmp_path / "defaults"
+    templates = tmp_path / "templates"
+    defaults.mkdir(parents=True)
+    monkeypatch.setattr(press_store, "DEFAULTS_DIR", defaults)
+    monkeypatch.setattr(
+        press_store, "DEFAULTS_MANIFEST_PATH", defaults / "manifest.json"
+    )
+    monkeypatch.setattr(press_store, "TEMPLATES_DIR", templates)
+
+    img = Image.fromarray(np.full((10, 10, 3), 100, dtype=np.uint8), "RGB")
+    img.save(defaults / "yes_button.png")
+    img.save(defaults / "cursor_idle.png")
+    (defaults / "manifest.json").write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "name": "Click Yes",
+                        "matcher": "template",
+                        "template_filename": "yes_button.png",
+                    }
+                ],
+                "bridge": {"idle_template_filename": "cursor_idle.png"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = press_store.default_config()
+    cfg["rules"].append(press_store.default_rule("Existing"))
+    cfg["bridge"]["idle_template_path"] = "user_idle.png"
+
+    assert press_store.seed_defaults_if_blank(cfg) is False
+    # Existing rule kept; the new "Click Yes" was NOT added because
+    # the rules list was non-empty when seed ran.
+    assert [r["name"] for r in cfg["rules"]] == ["Existing"]
+    assert cfg["bridge"]["idle_template_path"] == "user_idle.png"
 
 
 def test_write_template_with_dpi_variants_creates_all_files(tmp_path):

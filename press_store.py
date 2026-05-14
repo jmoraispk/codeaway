@@ -10,6 +10,9 @@ from pathlib import Path
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 CONFIG_PATH = TEMPLATES_DIR / "config.json"
+# Bundled defaults the app seeds on first launch — see defaults/README.md.
+DEFAULTS_DIR = Path(__file__).resolve().parent / "defaults"
+DEFAULTS_MANIFEST_PATH = DEFAULTS_DIR / "manifest.json"
 
 ACTION_CLICK = "click"
 ACTION_CLICK_TYPE_ENTER = "click+type+enter"
@@ -432,7 +435,14 @@ def normalize_config(config: dict | None) -> dict:
 def load_config() -> dict:
     ensure_templates_dir()
     if not CONFIG_PATH.exists():
-        return default_config()
+        # Fresh install — populate from defaults/ if any are bundled,
+        # then write the config so subsequent launches skip the seed
+        # path. The seed is a no-op when defaults/manifest.json is
+        # missing, which is the case in dev until pack_defaults runs.
+        cfg = default_config()
+        if seed_defaults_if_blank(cfg):
+            save_config(cfg)
+        return normalize_config(cfg)
     try:
         loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
@@ -560,6 +570,119 @@ def write_template_with_dpi_variants(
         Image.fromarray(resized, mode="RGB").save(variant_path, format="PNG", optimize=False)
         written.append(variant_path)
     return written
+
+
+# ---- Bundled defaults: first-run seed + pack round-trip -------------------
+
+
+def _read_defaults_manifest() -> dict | None:
+    """Load defaults/manifest.json if present. Returns None when the
+    bundle is missing or unreadable — seed treats that as 'no defaults
+    available' and silently no-ops."""
+    if not DEFAULTS_MANIFEST_PATH.exists():
+        return None
+    try:
+        return json.loads(DEFAULTS_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _copy_template_bundle(src_base: Path, dst_base: Path) -> int:
+    """Copy ``src_base`` plus every DPI variant sitting next to it
+    (``<base>.dpi<n>.<ext>``) into ``dst_base`` and its siblings.
+    Used by the seed and the pack tool. Returns the file count
+    copied; 0 if the base doesn't exist."""
+    import shutil
+
+    if not src_base.exists():
+        return 0
+    dst_base.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_base, dst_base)
+    written = 1
+    src_stem = src_base.stem
+    src_suffix = src_base.suffix
+    for sibling in src_base.parent.iterdir():
+        if not sibling.is_file() or sibling == src_base:
+            continue
+        if not sibling.name.startswith(src_stem + ".dpi"):
+            continue
+        if sibling.suffix.lower() != src_suffix.lower():
+            continue
+        # Variant filename in dst: replace dst's stem with the source
+        # variant's stem (preserves the `.dpi<n>` suffix on the
+        # variant side regardless of what the dst base is named).
+        variant_suffix = sibling.name[len(src_stem):]  # ".dpi100.png"
+        shutil.copy2(sibling, dst_base.with_name(dst_base.stem + variant_suffix))
+        written += 1
+    return written
+
+
+def seed_defaults_if_blank(cfg: dict) -> bool:
+    """If ``cfg`` has empty rules / bridge templates AND defaults are
+    bundled with the app, populate the empty slots from defaults/.
+
+    Mutates ``cfg`` in place. Returns True if anything was seeded.
+    Safe to call multiple times — every check is per-slot, so partial
+    seeds (rules present but bridge templates blank) are filled too.
+    Missing PNGs in defaults/ skip the corresponding entries silently
+    so a partial bundle still produces a working subset."""
+    manifest = _read_defaults_manifest()
+    if not manifest:
+        return False
+    seeded = False
+    ensure_templates_dir()
+    bridge = cfg.setdefault("bridge", default_bridge_config())
+
+    if not cfg.get("rules"):
+        for entry in manifest.get("rules", []) or []:
+            filename = entry.get("template_filename")
+            if not filename:
+                continue
+            src = DEFAULTS_DIR / filename
+            dst = TEMPLATES_DIR / filename
+            if _copy_template_bundle(src, dst) == 0:
+                continue  # bundle missing the actual PNG — skip
+            rule = default_rule(entry.get("name") or "New Rule")
+            rule["matcher"] = entry.get("matcher", MATCHER_TEMPLATE)
+            rule["template_path"] = filename
+            rule["template_source_dpi"] = _normalize_dpi(
+                entry.get("template_source_dpi")
+            )
+            rule["action"] = (
+                entry["action"] if entry.get("action") in ACTION_TYPES else ACTION_CLICK
+            )
+            if isinstance(entry.get("text"), str):
+                rule["text"] = entry["text"]
+            rule["threshold"] = _clamp_float(
+                entry.get("threshold"), 0.90, 0.0, 1.0
+            )
+            cfg.setdefault("rules", []).append(rule)
+            seeded = True
+
+    bridge_manifest = manifest.get("bridge") or {}
+    if not bridge.get("idle_template_path"):
+        filename = bridge_manifest.get("idle_template_filename")
+        if filename:
+            src = DEFAULTS_DIR / filename
+            dst = TEMPLATES_DIR / filename
+            if _copy_template_bundle(src, dst) > 0:
+                bridge["idle_template_path"] = filename
+                bridge["idle_template_source_dpi"] = _normalize_dpi(
+                    bridge_manifest.get("idle_template_source_dpi")
+                )
+                seeded = True
+    if not bridge.get("askuser_template_path"):
+        filename = bridge_manifest.get("askuser_template_filename")
+        if filename:
+            src = DEFAULTS_DIR / filename
+            dst = TEMPLATES_DIR / filename
+            if _copy_template_bundle(src, dst) > 0:
+                bridge["askuser_template_path"] = filename
+                bridge["askuser_template_source_dpi"] = _normalize_dpi(
+                    bridge_manifest.get("askuser_template_source_dpi")
+                )
+                seeded = True
+    return seeded
 
 
 def make_rule_summary(rule: dict, last_score: float | None = None) -> str:

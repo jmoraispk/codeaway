@@ -30,3 +30,4 @@ uia = [
 
 [project.scripts]
 auto-press = "main:main"
+auto-press-pack-defaults = "scripts.pack_defaults:main"
