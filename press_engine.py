@@ -341,32 +341,80 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
 
     ``configured`` is False if the window has no region set yet.
     """
+    import press_dpi
+    from press_store import SUPPORTED_DPI_SCALES, dpi_variant_path
+
     idle_ref = bridge_cfg.get("idle_template_path")
     askuser_ref = bridge_cfg.get("askuser_template_path")
+    idle_src_dpi = bridge_cfg.get("idle_template_source_dpi")
+    askuser_src_dpi = bridge_cfg.get("askuser_template_source_dpi")
     threshold = float(bridge_cfg.get("idle_threshold", 0.90))
     windows = bridge_cfg.get("windows") or []
     if not idle_ref or not windows:
         return []
 
-    idle_path = resolve_template_path(idle_ref)
-    if idle_path is None or not idle_path.exists():
-        return []
-    try:
-        idle_gray = load_template_gray(str(idle_path))
-    except Exception:
+    def _load_variants(base_ref, source_dpi):
+        """Load every DPI variant available for a template. Returns
+        ``{scale: gray_image}`` keyed by scale factor. Legacy
+        captures (no source_dpi) just return ``{None: base_gray}``,
+        which the picker treats as a one-size-fits-all fallback."""
+        base = resolve_template_path(base_ref)
+        if base is None or not base.exists():
+            return {}
+        try:
+            base_gray = load_template_gray(str(base))
+        except Exception:
+            return {}
+        variants: dict = {}
+        if source_dpi is None:
+            # No DPI metadata — keep one entry under the sentinel key so
+            # `_pick_variant` falls back to it on every window.
+            variants[None] = base_gray
+            return variants
+        try:
+            variants[float(source_dpi)] = base_gray
+        except (TypeError, ValueError):
+            variants[None] = base_gray
+            return variants
+        for scale in SUPPORTED_DPI_SCALES:
+            if scale in variants:
+                continue
+            vpath = dpi_variant_path(base, scale)
+            if not vpath.exists():
+                continue
+            try:
+                variants[scale] = load_template_gray(str(vpath))
+            except Exception:
+                continue
+        return variants
+
+    def _pick_variant(variants, target_scale):
+        """Closest-match by absolute scale distance. Returns the
+        legacy fallback (``variants[None]``) when no DPI metadata is
+        available — preserves the original behaviour for users who
+        haven't re-captured yet."""
+        if not variants:
+            return None
+        if None in variants and len(variants) == 1:
+            return variants[None]
+        keys = [k for k in variants.keys() if k is not None]
+        if target_scale in keys:
+            return variants[target_scale]
+        if not keys:
+            return variants.get(None)
+        best = min(keys, key=lambda s: abs(s - target_scale))
+        return variants[best]
+
+    idle_variants = _load_variants(idle_ref, idle_src_dpi)
+    if not idle_variants:
         return []
 
     # Askuser template is optional — if it's missing or unloadable, the
     # detector silently degrades to "asking is always False" and the
     # idle / busy behaviour is unchanged.
-    askuser_gray = None
+    askuser_variants = {}
     if isinstance(askuser_ref, str) and askuser_ref.strip():
-        askuser_path = resolve_template_path(askuser_ref)
-        if askuser_path is not None and askuser_path.exists():
-            try:
-                askuser_gray = load_template_gray(str(askuser_path))
-            except Exception:
-                askuser_gray = None
+        askuser_variants = _load_variants(askuser_ref, askuser_src_dpi)
 
     cv2, _np = ensure_vision()
     results: list[dict] = []
@@ -402,17 +450,21 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
                 }
             )
             continue
+        target_scale = press_dpi.scale_for_region(region)
+        idle_gray = _pick_variant(idle_variants, target_scale)
         idle_matches = _find_matches_in(
             search_gray, idle_gray, threshold, region_tuple[0], region_tuple[1]
-        )
+        ) if idle_gray is not None else []
         best_idle_score = idle_matches[0][0] if idle_matches else 0.0
         is_asking = False
-        if askuser_gray is not None:
-            askuser_matches = _find_matches_in(
-                search_gray, askuser_gray, threshold,
-                region_tuple[0], region_tuple[1],
-            )
-            is_asking = bool(askuser_matches)
+        if askuser_variants:
+            askuser_gray = _pick_variant(askuser_variants, target_scale)
+            if askuser_gray is not None:
+                askuser_matches = _find_matches_in(
+                    search_gray, askuser_gray, threshold,
+                    region_tuple[0], region_tuple[1],
+                )
+                is_asking = bool(askuser_matches)
         entry = {
             "id": window.get("id"),
             "name": window.get("name", "Cursor"),

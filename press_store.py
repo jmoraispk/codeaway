@@ -100,6 +100,12 @@ def default_bridge_config() -> dict:
         # The single template that, when found inside a window's region,
         # means that window is idle and ready for input.
         "idle_template_path": None,
+        # Scale factor (1.0 / 1.25 / 1.5 / 1.75 / 2.0) the idle template
+        # was captured at. None for legacy captures with no DPI metadata
+        # — they still match, but only on monitors at the same DPI as
+        # the original capture. New captures generate scaled variants
+        # for every supported preset and store the original here.
+        "idle_template_source_dpi": None,
         "idle_threshold": 0.90,
         # Optional second template: a marker for Cursor's AskUserQuestion
         # multiple-choice prompt (e.g. the "Submit answers" pill at the
@@ -107,6 +113,7 @@ def default_bridge_config() -> dict:
         # in "asking" state — a third option alongside idle / busy.
         # Captured the same way as the idle template via the Bridge tab.
         "askuser_template_path": None,
+        "askuser_template_source_dpi": None,
         # Cursor windows the bridge watches; empty list = bridge has nothing
         # useful to do. Each entry is a default_bridge_window() dict. This
         # is a working copy of the active setup's windows — every save
@@ -261,6 +268,46 @@ def _normalize_window(window: dict | None) -> dict:
     return base
 
 
+# Supported display-scaling presets — must match press_dpi.SUPPORTED_SCALES
+# (kept here to avoid importing Win32-only code from the store at module load).
+SUPPORTED_DPI_SCALES: tuple[float, ...] = (1.0, 1.25, 1.5, 1.75, 2.0)
+
+
+def _normalize_dpi(value) -> float | None:
+    """Coerce a source-DPI metadata field. Accepts the supported
+    preset scales (1.0/1.25/1.5/1.75/2.0); blank/None/invalid →
+    None (legacy template, no DPI awareness)."""
+    if value is None:
+        return None
+    try:
+        scale = float(value)
+    except (TypeError, ValueError):
+        return None
+    if scale <= 0:
+        return None
+    # Snap to nearest preset within 5 % so a rounding drift doesn't
+    # leave us with a scale that has no matching variant file.
+    best = min(SUPPORTED_DPI_SCALES, key=lambda s: abs(s - scale))
+    if abs(best - scale) <= 0.05:
+        return best
+    return float(scale)
+
+
+def dpi_tag(scale: float) -> str:
+    """Filename suffix for a scale factor — '100', '125', etc."""
+    return f"{int(round(scale * 100))}"
+
+
+def dpi_variant_path(base_path: Path | str, scale: float) -> Path:
+    """Path to the DPI variant of ``base_path`` at the given scale.
+
+    Naming convention: ``<base>.dpi<n>.png``. The base file itself is
+    a duplicate of the source-DPI variant, so a non-DPI-aware caller
+    can keep using ``base_path`` and get the original capture."""
+    base = Path(base_path)
+    return base.with_suffix(f".dpi{dpi_tag(scale)}{base.suffix}")
+
+
 def _valid_vk(value) -> bool:
     try:
         return 0 <= int(value) <= 0xFFFF
@@ -295,12 +342,18 @@ def _normalize_bridge(bridge: dict | None) -> dict:
         base["idle_template_path"] = tpl.strip()
     else:
         base["idle_template_path"] = None
+    base["idle_template_source_dpi"] = _normalize_dpi(
+        bridge.get("idle_template_source_dpi")
+    )
     base["idle_threshold"] = _clamp_float(bridge.get("idle_threshold"), 0.90, 0.0, 1.0)
     ask = bridge.get("askuser_template_path")
     if isinstance(ask, str) and ask.strip():
         base["askuser_template_path"] = ask.strip()
     else:
         base["askuser_template_path"] = None
+    base["askuser_template_source_dpi"] = _normalize_dpi(
+        bridge.get("askuser_template_source_dpi")
+    )
 
     raw_windows = bridge.get("windows")
     if isinstance(raw_windows, list):
@@ -421,6 +474,61 @@ def list_template_files() -> list[str]:
     exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
     files = [p.name for p in TEMPLATES_DIR.iterdir() if p.is_file() and p.suffix.lower() in exts]
     return sorted(files)
+
+
+def write_template_with_dpi_variants(
+    base_path: Path | str,
+    rgb_array,
+    source_scale: float,
+    target_scales: tuple[float, ...] = SUPPORTED_DPI_SCALES,
+) -> list[Path]:
+    """Write ``rgb_array`` to ``base_path`` AND a sibling file per
+    target DPI scale (``base.dpi<n>.png``). The base file is a
+    bit-for-bit copy of the source variant so callers that don't
+    know about DPI just see the original capture.
+
+    Lazy-imports cv2/PIL so the press_store module stays usable in
+    headless / test environments that don't have the imaging stack.
+    Returns the list of files written, in the order they were
+    written (base first, then variants ascending by scale)."""
+    import numpy as np  # imported here so test envs without numpy still load this module
+    from PIL import Image
+    import cv2
+
+    base = Path(base_path)
+    base.parent.mkdir(parents=True, exist_ok=True)
+
+    if rgb_array is None:
+        raise ValueError("rgb_array required")
+    arr = np.asarray(rgb_array)
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        raise ValueError(f"expected HxWx3 RGB, got {arr.shape}")
+
+    written: list[Path] = [base]
+    Image.fromarray(arr, mode="RGB").save(base, format="PNG", optimize=False)
+
+    src_h, src_w = arr.shape[:2]
+    for target in sorted(target_scales):
+        ratio = target / max(source_scale, 1e-6)
+        new_w = max(1, int(round(src_w * ratio)))
+        new_h = max(1, int(round(src_h * ratio)))
+        if ratio < 1.0:
+            interp = cv2.INTER_AREA  # downscale — averaging is sharpest
+        elif abs(ratio - 1.0) < 1e-3:
+            # Same size as source; skip the resize round-trip and
+            # write the original bytes again so the variant exists.
+            new_w, new_h = src_w, src_h
+            interp = None
+        else:
+            interp = cv2.INTER_CUBIC  # upscale — cubic looks the cleanest
+        if interp is None:
+            resized = arr
+        else:
+            resized = cv2.resize(arr, (new_w, new_h), interpolation=interp)
+        variant_path = dpi_variant_path(base, target)
+        Image.fromarray(resized, mode="RGB").save(variant_path, format="PNG", optimize=False)
+        written.append(variant_path)
+    return written
 
 
 def make_rule_summary(rule: dict, last_score: float | None = None) -> str:

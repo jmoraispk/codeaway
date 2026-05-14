@@ -1959,7 +1959,23 @@ class MainWindow(QMainWindow):
                 f"  • {state['name']}: {verdict} (idle-score {state['score']:.3f})"
             )
 
-    def _capture_bridge_idle_template(self) -> None:
+    def _capture_bridge_template(
+        self,
+        filename: str,
+        cfg_path_key: str,
+        cfg_dpi_key: str,
+        label: str,
+    ) -> None:
+        """Shared capture flow for the idle / askuser templates.
+
+        Captures the drag bbox as RGB, detects the source monitor's
+        DPI scale, then writes the base PNG plus one scaled variant
+        per supported preset (100/125/150/175/200). Stores the source
+        scale in config so the matcher can pick the right variant for
+        each window's monitor at runtime."""
+        import press_dpi as dpimod
+        from press_store import write_template_with_dpi_variants
+
         try:
             ensure_vision()
         except Exception as exc:
@@ -1967,50 +1983,45 @@ class MainWindow(QMainWindow):
             return
         bbox = capture_drag_bbox(self)
         if not bbox:
-            self._bridge_log("idle template capture cancelled")
+            self._bridge_log(f"{label} template capture cancelled")
             return
         try:
-            gray = capture_screen_gray(tuple(bbox))
-            path = template_asset_path("bridge_idle.png")
-            save_gray_image(str(path), gray)
+            rgb = capture_screen_rgb(tuple(bbox))
+            source_scale = dpimod.scale_for_region(bbox)
+            path = template_asset_path(filename)
+            written = write_template_with_dpi_variants(path, rgb, source_scale)
             stored = serialize_template_path(path)
             with self._cfg_lock:
-                self._cfg["bridge"]["idle_template_path"] = stored
+                self._cfg["bridge"][cfg_path_key] = stored
+                self._cfg["bridge"][cfg_dpi_key] = source_scale
             self._persist()
             self._refresh_bridge_template_view()
             self._bridge_log(
-                f"captured idle template → {stored} ({bbox[2]}×{bbox[3]} px)"
+                f"captured {label} template → {stored} "
+                f"({bbox[2]}×{bbox[3]} px @ {int(round(source_scale * 100))}% DPI, "
+                f"{len(written) - 1} scaled variants)"
             )
         except Exception as exc:
             self._bridge_log(f"capture failed: {exc}")
+
+    def _capture_bridge_idle_template(self) -> None:
+        self._capture_bridge_template(
+            "bridge_idle.png",
+            "idle_template_path",
+            "idle_template_source_dpi",
+            "idle",
+        )
 
     def _capture_bridge_askuser_template(self) -> None:
         """Same flow as the idle template capture, but writes to the
         askuser slot. Optional template — leaving it empty means the
         bridge never reports "asking" state."""
-        try:
-            ensure_vision()
-        except Exception as exc:
-            self._bridge_log(f"capture failed: {exc}")
-            return
-        bbox = capture_drag_bbox(self)
-        if not bbox:
-            self._bridge_log("askuser template capture cancelled")
-            return
-        try:
-            gray = capture_screen_gray(tuple(bbox))
-            path = template_asset_path("bridge_askuser.png")
-            save_gray_image(str(path), gray)
-            stored = serialize_template_path(path)
-            with self._cfg_lock:
-                self._cfg["bridge"]["askuser_template_path"] = stored
-            self._persist()
-            self._refresh_bridge_template_view()
-            self._bridge_log(
-                f"captured askuser template → {stored} ({bbox[2]}×{bbox[3]} px)"
-            )
-        except Exception as exc:
-            self._bridge_log(f"capture failed: {exc}")
+        self._capture_bridge_template(
+            "bridge_askuser.png",
+            "askuser_template_path",
+            "askuser_template_source_dpi",
+            "askuser",
+        )
 
     def _on_bridge_threshold_changed(self, value: float) -> None:
         with self._cfg_lock:
