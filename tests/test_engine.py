@@ -1,6 +1,36 @@
 import press_engine
 
 
+def test_pick_template_from_pack_picks_closest_scale():
+    """Closest-by-distance pick — a target on the 150 % monitor
+    should pull the 150 % variant when one exists, otherwise the
+    nearest available scale."""
+    base = object()
+    v100 = object()
+    v150 = object()
+    pack = {
+        "base": base,
+        "variants": {1.0: v100, 1.5: v150},
+        "source_dpi": 1.5,
+    }
+    assert press_engine._pick_template_from_pack(pack, 1.5) is v150
+    assert press_engine._pick_template_from_pack(pack, 1.0) is v100
+    # Equidistant tie-break (1.25 between 1.0 and 1.5) — min() picks
+    # whichever comes first in the dict ordering; both are reasonable,
+    # so just assert it's one of the two and not None.
+    chosen = press_engine._pick_template_from_pack(pack, 1.25)
+    assert chosen in (v100, v150)
+
+
+def test_pick_template_from_pack_falls_through_to_base_for_legacy_capture():
+    """A pack with no variants (legacy capture, no source_dpi)
+    returns the base template — the original behaviour, no
+    surprises for users who haven't re-captured yet."""
+    base = object()
+    pack = {"base": base, "variants": {}, "source_dpi": None}
+    assert press_engine._pick_template_from_pack(pack, 1.5) is base
+
+
 def test_evaluate_rules_returns_all_matches(monkeypatch):
     runtime_rules = [
         {"id": "a", "name": "Rule A", "threshold": 0.9},

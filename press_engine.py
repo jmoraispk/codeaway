@@ -105,6 +105,50 @@ def dominant_rgb(rgb_array) -> tuple[int, int, int]:
     return int(r), int(g), int(b)
 
 
+def _load_dpi_variant_pack(base_path, source_dpi):
+    """Load the base template plus every DPI variant sitting next to
+    it on disk. Returns ``{"base": gray, "variants": {scale: gray},
+    "source_dpi": float|None}``. The matcher picks a variant by the
+    target screen's scale; the base is the fallback when no variant
+    matches (or when source_dpi is None for legacy captures)."""
+    from press_store import SUPPORTED_DPI_SCALES, dpi_variant_path
+
+    base_gray = load_template_gray(str(base_path))
+    pack = {"base": base_gray, "variants": {}, "source_dpi": None}
+    if source_dpi is None:
+        return pack
+    try:
+        src_scale = float(source_dpi)
+    except (TypeError, ValueError):
+        return pack
+    pack["source_dpi"] = src_scale
+    pack["variants"][src_scale] = base_gray
+    for scale in SUPPORTED_DPI_SCALES:
+        if scale in pack["variants"]:
+            continue
+        vpath = dpi_variant_path(base_path, scale)
+        if not vpath.exists():
+            continue
+        try:
+            pack["variants"][scale] = load_template_gray(str(vpath))
+        except Exception:
+            continue
+    return pack
+
+
+def _pick_template_from_pack(pack: dict, target_scale: float):
+    """Closest-by-distance pick from a variant pack. Falls through
+    to ``pack['base']`` when no variants are loaded (legacy capture)."""
+    variants = pack.get("variants") or {}
+    if not variants:
+        return pack["base"]
+    if target_scale in variants:
+        return variants[target_scale]
+    keys = list(variants.keys())
+    best = min(keys, key=lambda s: abs(s - target_scale))
+    return variants[best]
+
+
 def build_runtime_rules(config: dict) -> list[dict]:
     runtime_rules: list[dict] = []
     for rule in sorted(config.get("rules", []), key=lambda item: int(item.get("priority", 9999))):
@@ -122,10 +166,22 @@ def build_runtime_rules(config: dict) -> list[dict]:
         template_path = resolve_template_path(rule.get("template_path"))
         if template_path is None or not template_path.exists():
             continue
+        try:
+            pack = _load_dpi_variant_pack(
+                template_path, rule.get("template_source_dpi")
+            )
+        except Exception:
+            continue
         runtime_rules.append(
             {
                 **rule,
-                "template_gray": load_template_gray(str(template_path)),
+                # ``template_gray`` stays so existing call sites
+                # (find_rule_matches default + legacy tests) keep
+                # working unchanged; ``template_pack`` is the new
+                # DPI-aware structure the matcher prefers when a
+                # search_region is set.
+                "template_gray": pack["base"],
+                "template_pack": pack,
             }
         )
     return runtime_rules
@@ -232,9 +288,23 @@ def find_rule_matches(frame, runtime_rule: dict) -> list[tuple[float, tuple[int,
             frame = capture_screen_gray()
         search_gray = frame
         offset_x, offset_y = _virtual_screen_origin()
+    # Pick the DPI variant matching the search region's monitor. With
+    # no search_region we'd be matching across the full virtual screen
+    # (possibly spanning monitors at different scales) — there's no
+    # single right answer, so we fall back to the captured base. Users
+    # who want DPI-aware matching on multi-monitor setups should set a
+    # search_region on the target monitor.
+    pack = runtime_rule.get("template_pack")
+    if pack and region:
+        import press_dpi as _dpi
+
+        scale = _dpi.scale_for_region(region)
+        template_gray = _pick_template_from_pack(pack, scale)
+    else:
+        template_gray = runtime_rule["template_gray"]
     return _find_matches_in(
         search_gray,
-        runtime_rule["template_gray"],
+        template_gray,
         float(runtime_rule.get("threshold", 0.90)),
         offset_x,
         offset_y,

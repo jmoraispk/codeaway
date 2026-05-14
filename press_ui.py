@@ -3167,6 +3167,9 @@ class MainWindow(QMainWindow):
         self._log(f"[color] {hex_label} cleared from {cleared} rule(s)")
 
     def _capture_template(self) -> None:
+        import press_dpi as dpimod
+        from press_store import write_template_with_dpi_variants
+
         idx = self._current_rule_index()
         if idx is None:
             self._log("[capture] add or select a rule first"); return
@@ -3178,18 +3181,22 @@ class MainWindow(QMainWindow):
         if not bbox:
             self._log("[capture] template capture cancelled"); return
         try:
-            gray = capture_screen_gray(tuple(bbox))
+            rgb = capture_screen_rgb(tuple(bbox))
+            source_scale = dpimod.scale_for_region(bbox)
             file_name = f"rule_{self._cfg['rules'][idx]['id']}.png"
             path = template_asset_path(file_name)
-            save_gray_image(str(path), gray)
+            written = write_template_with_dpi_variants(path, rgb, source_scale)
             stored_path = serialize_template_path(path)
             with self._cfg_lock:
                 rule = self._cfg["rules"][idx]
                 rule["template_path"] = stored_path
+                rule["template_source_dpi"] = source_scale
                 rule["matcher"] = MATCHER_TEMPLATE
             self._persist(); self._refresh_rule_list(idx); self._refresh_template_choices(stored_path)
             self._log(
-                f"[capture] {path.name}  bbox=({bbox[0]},{bbox[1]}) size={bbox[2]}x{bbox[3]} → {gray.shape[1]}x{gray.shape[0]}"
+                f"[capture] {path.name}  bbox=({bbox[0]},{bbox[1]}) "
+                f"size={bbox[2]}x{bbox[3]} @ {int(round(source_scale * 100))}% DPI, "
+                f"{len(written) - 1} scaled variants"
             )
         except Exception as exc:
             self._log(f"[error] template capture failed: {exc}")

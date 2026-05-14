@@ -108,6 +108,51 @@ def test_bridge_config_round_trips_source_dpi(tmp_path, monkeypatch):
     assert loaded["bridge"]["askuser_template_source_dpi"] == 2.0
 
 
+def test_rule_schema_round_trips_template_source_dpi(tmp_path, monkeypatch):
+    """Rule's template_source_dpi must survive save → load so the
+    rule matcher can pick the right DPI variant on subsequent runs."""
+    monkeypatch.setattr(press_store, "TEMPLATES_DIR", tmp_path)
+    monkeypatch.setattr(press_store, "CONFIG_PATH", tmp_path / "config.json")
+
+    cfg = press_store.default_config()
+    rule = press_store.default_rule("DpiAware")
+    rule["template_path"] = "rule_x.png"
+    rule["template_source_dpi"] = 1.5
+    cfg["rules"].append(rule)
+    press_store.save_config(cfg)
+    [loaded_rule] = press_store.load_config()["rules"]
+    assert loaded_rule["template_source_dpi"] == 1.5
+
+
+def test_list_template_files_hides_dpi_variants(tmp_path, monkeypatch):
+    """Variant files (foo.dpi100.png, …) live on disk alongside the
+    base PNG so the matcher can find them, but they shouldn't show
+    up in the template picker — they aren't canonical templates."""
+    templates_dir = tmp_path / "templates"
+    templates_dir.mkdir(parents=True)
+    for name in [
+        "rule_a.png",
+        "rule_a.dpi100.png",
+        "rule_a.dpi125.png",
+        "rule_a.dpi150.png",
+        "rule_a.dpi175.png",
+        "rule_a.dpi200.png",
+        "rule_b.png",
+    ]:
+        (templates_dir / name).write_bytes(b"fake")
+    monkeypatch.setattr(press_store, "TEMPLATES_DIR", templates_dir)
+    assert press_store.list_template_files() == ["rule_a.png", "rule_b.png"]
+
+
+def test_is_dpi_variant_file_recognises_pattern():
+    assert press_store.is_dpi_variant_file("rule_a.dpi100.png")
+    assert press_store.is_dpi_variant_file("foo.bar.dpi150.png")
+    assert not press_store.is_dpi_variant_file("rule_a.png")
+    assert not press_store.is_dpi_variant_file("not_a_dpi_file.png")
+    # Bare 'dpi' without digits is fine — only digit suffix matters.
+    assert not press_store.is_dpi_variant_file("rule_dpi.png")
+
+
 def test_write_template_with_dpi_variants_creates_all_files(tmp_path):
     """Capturing at 1.5x should produce the base PNG + one scaled
     variant per supported preset (100/125/150/175/200)."""
