@@ -353,6 +353,15 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
     if not idle_ref or not windows:
         return []
 
+    # ---- per-monitor matching pipeline ----
+    # Old shape was N captures + N×M matches (N windows, M templates).
+    # New shape: K captures + K×M matches (K = distinct monitors hosting
+    # at least one configured window). For a typical 4-window setup on
+    # one screen, that's 1 capture + 2 matches per tick instead of 4 + 8.
+    # The trade-off is matchTemplate runs on a bigger search image
+    # (whole monitor vs window region); cv2's matchTemplate is fast
+    # enough on a 1080p screen that the saving on captures dominates.
+
     def _load_variants(base_ref, source_dpi):
         """Load every DPI variant available for a template. Returns
         ``{scale: gray_image}`` keyed by scale factor. Legacy
@@ -417,25 +426,160 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
         askuser_variants = _load_variants(askuser_ref, askuser_src_dpi)
 
     cv2, _np = ensure_vision()
-    results: list[dict] = []
+
+    # Group configured windows by monitor. The monitor key is the
+    # bounding rect tuple — same key, same capture. Windows with no
+    # region (or unresolvable monitor) get handled in a separate
+    # fallback pass that uses per-window capture.
+    by_monitor: dict[tuple, dict] = {}
+    monitor_for_window: dict[str, tuple] = {}
+    unresolved_windows: list[dict] = []
+    no_region_windows: list[dict] = []
     for window in windows:
         region = window.get("region")
         if not region or len(region) != 4:
+            no_region_windows.append(window)
+            continue
+        info = press_dpi.monitor_info_for_region(region)
+        if info is None:
+            # No DPI service (non-Windows tests, or API hiccup) —
+            # this window falls back to the legacy per-window path.
+            unresolved_windows.append(window)
+            continue
+        key = info["key"]
+        monitor_for_window[window["id"]] = key
+        bucket = by_monitor.get(key)
+        if bucket is None:
+            by_monitor[key] = {
+                "rect": info["rect"],
+                "scale": info["scale"],
+                "windows": [window],
+                "rgb": None,
+                "gray": None,
+                "idle_matches": [],
+                "askuser_matches": [],
+            }
+        else:
+            bucket["windows"].append(window)
+
+    # Capture each unique monitor once + run all template matches.
+    for key, bucket in by_monitor.items():
+        try:
+            bucket["rgb"] = capture_screen_rgb(bucket["rect"])
+            bucket["gray"] = cv2.cvtColor(bucket["rgb"], cv2.COLOR_RGB2GRAY)
+        except Exception:
+            # Capture failed for this monitor — every window on it
+            # gets a "configured but no signal" entry. Don't crash
+            # the whole tick over one bad monitor.
+            bucket["rgb"] = None
+            bucket["gray"] = None
+            continue
+        mx, my = bucket["rect"][0], bucket["rect"][1]
+        idle_gray = _pick_variant(idle_variants, bucket["scale"])
+        if idle_gray is not None:
+            bucket["idle_matches"] = _find_matches_in(
+                bucket["gray"], idle_gray, threshold, mx, my
+            )
+        if askuser_variants:
+            askuser_gray = _pick_variant(askuser_variants, bucket["scale"])
+            if askuser_gray is not None:
+                bucket["askuser_matches"] = _find_matches_in(
+                    bucket["gray"], askuser_gray, threshold, mx, my
+                )
+
+    def _matches_inside(matches, region):
+        """Filter (score, (cx, cy)) entries to those whose centre is
+        inside ``region`` [x, y, w, h]. Returns the original tuples,
+        sorted by score desc (the input is already sorted)."""
+        x, y, w, h = region
+        x_end, y_end = x + w, y + h
+        out = []
+        for score, (cx, cy) in matches:
+            if x <= cx < x_end and y <= cy < y_end:
+                out.append((score, (cx, cy)))
+        return out
+
+    def _slice_window_rgb(bucket, region):
+        """Crop the window's region out of the monitor capture.
+        Returns None if the slice is empty (region entirely off-screen
+        from the captured rect, which shouldn't happen in practice)."""
+        if bucket.get("rgb") is None:
+            return None
+        mx, my, _mw, _mh = bucket["rect"]
+        rx, ry, rw, rh = region
+        x0 = max(0, rx - mx)
+        y0 = max(0, ry - my)
+        x1 = min(bucket["rgb"].shape[1], rx - mx + rw)
+        y1 = min(bucket["rgb"].shape[0], ry - my + rh)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return bucket["rgb"][y0:y1, x0:x1]
+
+    results: list[dict] = []
+    # Emit "no region configured" entries first so the order in
+    # ``results`` roughly mirrors the order in cfg.windows (callers
+    # like the worker don't rely on order, but consistency makes
+    # debugging easier).
+    for window in no_region_windows:
+        results.append(
+            {
+                "id": window.get("id"),
+                "name": window.get("name", "Cursor"),
+                "idle": False,
+                "asking": False,
+                "score": 0.0,
+                "configured": False,
+            }
+        )
+
+    # Windows whose monitor we could resolve — read off the cached
+    # per-monitor match lists and spatially filter.
+    for window in windows:
+        if window in no_region_windows or window in unresolved_windows:
+            continue
+        wid = window["id"]
+        key = monitor_for_window.get(wid)
+        bucket = by_monitor.get(key) if key else None
+        if bucket is None or bucket.get("gray") is None:
             results.append(
                 {
-                    "id": window.get("id"),
+                    "id": wid,
                     "name": window.get("name", "Cursor"),
                     "idle": False,
                     "asking": False,
                     "score": 0.0,
-                    "configured": False,
+                    "configured": True,
                 }
             )
             continue
+        region = window["region"]
+        region_tuple = (int(region[0]), int(region[1]), int(region[2]), int(region[3]))
+        idle_inside = _matches_inside(bucket["idle_matches"], region_tuple)
+        best_idle_score = idle_inside[0][0] if idle_inside else 0.0
+        askuser_inside = (
+            _matches_inside(bucket["askuser_matches"], region_tuple)
+            if bucket["askuser_matches"]
+            else []
+        )
+        entry = {
+            "id": wid,
+            "name": window.get("name", "Cursor"),
+            "idle": bool(idle_inside),
+            "asking": bool(askuser_inside),
+            "score": float(best_idle_score),
+            "configured": True,
+        }
+        if capture_rgb:
+            entry["rgb"] = _slice_window_rgb(bucket, region_tuple)
+        results.append(entry)
+
+    # Fallback per-window path: only fires when monitor_info_for_region
+    # returned None — typically a non-Windows test bench. Mirrors the
+    # original pre-phase-2 capture + match loop exactly.
+    for window in unresolved_windows:
+        region = window["region"]
         region_tuple = (int(region[0]), int(region[1]), int(region[2]), int(region[3]))
         try:
-            # One capture, two derived images: gray for matchTemplate,
-            # rgb (optional) for the snapshot ring buffer.
             rgb = capture_screen_rgb(region_tuple)
             search_gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         except Exception:
@@ -452,17 +596,23 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
             continue
         target_scale = press_dpi.scale_for_region(region)
         idle_gray = _pick_variant(idle_variants, target_scale)
-        idle_matches = _find_matches_in(
-            search_gray, idle_gray, threshold, region_tuple[0], region_tuple[1]
-        ) if idle_gray is not None else []
-        best_idle_score = idle_matches[0][0] if idle_matches else 0.0
+        idle_matches = (
+            _find_matches_in(
+                search_gray, idle_gray, threshold, region_tuple[0], region_tuple[1]
+            )
+            if idle_gray is not None
+            else []
+        )
         is_asking = False
         if askuser_variants:
             askuser_gray = _pick_variant(askuser_variants, target_scale)
             if askuser_gray is not None:
                 askuser_matches = _find_matches_in(
-                    search_gray, askuser_gray, threshold,
-                    region_tuple[0], region_tuple[1],
+                    search_gray,
+                    askuser_gray,
+                    threshold,
+                    region_tuple[0],
+                    region_tuple[1],
                 )
                 is_asking = bool(askuser_matches)
         entry = {
@@ -470,10 +620,11 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
             "name": window.get("name", "Cursor"),
             "idle": bool(idle_matches),
             "asking": is_asking,
-            "score": float(best_idle_score),
+            "score": float(idle_matches[0][0]) if idle_matches else 0.0,
             "configured": True,
         }
         if capture_rgb:
             entry["rgb"] = rgb
         results.append(entry)
+
     return results

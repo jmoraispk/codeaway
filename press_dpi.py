@@ -31,8 +31,8 @@ SUPPORTED_SCALES: tuple[float, ...] = (1.0, 1.25, 1.5, 1.75, 2.0)
 
 if IS_WINDOWS:
     import ctypes
-    from ctypes import byref, c_int, c_uint, c_void_p
-    from ctypes.wintypes import HMONITOR, POINT, RECT
+    from ctypes import byref, c_int, c_uint, c_void_p, c_wchar
+    from ctypes.wintypes import BOOL, DWORD, HMONITOR, POINT, RECT
 
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
     _shcore = ctypes.WinDLL("shcore", use_last_error=True)
@@ -48,6 +48,18 @@ if IS_WINDOWS:
     _GetDpiForMonitor = _shcore.GetDpiForMonitor
     _GetDpiForMonitor.argtypes = [HMONITOR, c_uint, ctypes.POINTER(c_uint), ctypes.POINTER(c_uint)]
     _GetDpiForMonitor.restype = c_int
+
+    class _MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", DWORD),
+            ("rcMonitor", RECT),
+            ("rcWork", RECT),
+            ("dwFlags", DWORD),
+        ]
+
+    _GetMonitorInfoW = _user32.GetMonitorInfoW
+    _GetMonitorInfoW.argtypes = [HMONITOR, ctypes.POINTER(_MONITORINFO)]
+    _GetMonitorInfoW.restype = BOOL
 
     # MonitorFromPoint flag — "use the nearest monitor if the point is
     # outside any monitor's bounds". Saves an extra branch for
@@ -113,6 +125,57 @@ def scale_tag(scale: float) -> str:
     '150', etc. Used by the template-variant naming convention
     so callers don't have to format floats consistently."""
     return f"{int(round(scale * 100))}"
+
+
+def monitor_info_for_point(x: int, y: int) -> Optional[dict]:
+    """Bounding rect + scale for the monitor containing (x, y).
+
+    Returns ``{"rect": (x, y, w, h), "scale": float, "key": tuple}``
+    where ``rect`` is the monitor's physical bounding box in screen
+    coords (suitable for ``capture_screen_rgb``) and ``key`` is a
+    hashable tuple usable as a dict key for grouping windows by
+    monitor. ``None`` on non-Windows or API failure — caller should
+    fall back to per-window capture in that case.
+    """
+    if not IS_WINDOWS:
+        return None
+    try:
+        pt = POINT(int(x), int(y))
+        hmon = _MonitorFromPoint(pt, _MONITOR_DEFAULTTONEAREST)
+        if not hmon:
+            return None
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not _GetMonitorInfoW(hmon, byref(info)):
+            return None
+        rc = info.rcMonitor
+        rect = (
+            int(rc.left),
+            int(rc.top),
+            int(rc.right - rc.left),
+            int(rc.bottom - rc.top),
+        )
+        dpi_x = c_uint(96)
+        dpi_y = c_uint(96)
+        scale = 1.0
+        if _GetDpiForMonitor(hmon, _MDT_EFFECTIVE_DPI, byref(dpi_x), byref(dpi_y)) == 0:
+            scale = _round_to_supported(dpi_x.value / 96.0)
+        return {"rect": rect, "scale": scale, "key": rect}
+    except Exception as exc:
+        LOG.warning("monitor_info_for_point failed: %s", exc)
+        return None
+
+
+def monitor_info_for_region(region: Optional[list | tuple]) -> Optional[dict]:
+    """Same as ``monitor_info_for_point`` but takes a [x, y, w, h]
+    bbox and uses its centre."""
+    if not region or len(region) != 4:
+        return None
+    try:
+        x, y, w, h = (int(v) for v in region)
+    except (TypeError, ValueError):
+        return None
+    return monitor_info_for_point(x + w // 2, y + h // 2)
 
 
 def all_monitor_scales() -> Tuple[float, ...]:
