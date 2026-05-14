@@ -541,6 +541,15 @@ def fastapi_client():
     def perform_window_scroll(window, amount, bridge_cfg):
         calls["window_scroll"].append((dict(window), int(amount)))
 
+    def perform_window_click_at(window, x_frac, y_frac, bridge_cfg):
+        region = window["region"]
+        target_x = int(region[0] + x_frac * region[2])
+        target_y = int(region[1] + y_frac * region[3])
+        calls.setdefault("window_clicks", []).append(
+            (dict(window), float(x_frac), float(y_frac), target_x, target_y)
+        )
+        return (target_x, target_y)
+
     def is_rules_running():
         return bool(calls["rules_running"])
 
@@ -594,6 +603,7 @@ def fastapi_client():
         perform_send=perform_send,
         perform_window_send=perform_window_send,
         perform_window_scroll=perform_window_scroll,
+        perform_window_click_at=perform_window_click_at,
         is_rules_running=is_rules_running,
         set_rules_running=set_rules_running,
         rename_window=rename_window,
@@ -1503,3 +1513,71 @@ def test_workspace_bind_endpoint_returns_guid(fastapi_client):
     res = client.post("/api/bridge/workspace/bind")
     assert res.status_code == 200
     assert res.json() == {"workspace_id": "{abcd-1234}"}
+
+
+# ---- Click-at-fraction (phone tap-to-click on snapshot) -------------------
+
+def test_click_at_translates_fractions_to_screen_coords(fastapi_client):
+    """A tap at (0.5, 0.25) on a 800x600 window region at (100, 200)
+    must land at (500, 350) in screen coords. DPI doesn't enter the
+    math — the snapshot is captured at the window's physical pixels."""
+    client, service, calls = fastapi_client
+    calls["cfg"]["bridge"]["windows"] = [
+        {"id": "w1", "name": "Cursor", "region": [100, 200, 800, 600]},
+    ]
+    res = client.post(
+        "/api/windows/w1/click_at",
+        json={"x_frac": 0.5, "y_frac": 0.25},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["clicked"] is True
+    assert body["target"] == [500, 350]
+    [(_, x_frac, y_frac, tx, ty)] = calls["window_clicks"]
+    assert (x_frac, y_frac, tx, ty) == (0.5, 0.25, 500, 350)
+
+
+def test_click_at_rejects_out_of_range_fractions(fastapi_client):
+    client, service, calls = fastapi_client
+    calls["cfg"]["bridge"]["windows"] = [
+        {"id": "w1", "name": "Cursor", "region": [0, 0, 100, 100]},
+    ]
+    res = client.post(
+        "/api/windows/w1/click_at",
+        json={"x_frac": 1.5, "y_frac": 0.5},
+    )
+    assert res.status_code == 400
+
+
+def test_click_at_404_for_unknown_window(fastapi_client):
+    client, service, calls = fastapi_client
+    res = client.post(
+        "/api/windows/does-not-exist/click_at",
+        json={"x_frac": 0.5, "y_frac": 0.5},
+    )
+    assert res.status_code == 404
+
+
+def test_click_at_400_when_window_has_no_region(fastapi_client):
+    client, service, calls = fastapi_client
+    calls["cfg"]["bridge"]["windows"] = [
+        {"id": "w1", "name": "Cursor", "region": None},
+    ]
+    res = client.post(
+        "/api/windows/w1/click_at",
+        json={"x_frac": 0.5, "y_frac": 0.5},
+    )
+    assert res.status_code == 400
+
+
+def test_click_at_501_when_callback_unwired(fastapi_client):
+    client, service, calls = fastapi_client
+    calls["cfg"]["bridge"]["windows"] = [
+        {"id": "w1", "name": "Cursor", "region": [0, 0, 100, 100]},
+    ]
+    service.callbacks.perform_window_click_at = None
+    res = client.post(
+        "/api/windows/w1/click_at",
+        json={"x_frac": 0.5, "y_frac": 0.5},
+    )
+    assert res.status_code == 501

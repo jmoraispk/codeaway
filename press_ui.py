@@ -3590,6 +3590,7 @@ class MainWindow(QMainWindow):
             perform_send=self._bridge_perform_send,
             perform_window_send=self._bridge_perform_window_send,
             perform_window_scroll=self._bridge_perform_window_scroll,
+            perform_window_click_at=self._bridge_perform_window_click_at,
             perform_read=None,
             request_reload=self._bridge_request_reload,
             is_rules_running=self._bridge_is_rules_running,
@@ -3764,6 +3765,37 @@ class MainWindow(QMainWindow):
         target = (x + int(w * 0.05), y + h // 2)
         direction = "down" if int(amount) < 0 else "up"
         focus_and_press_arrow(target, direction, abs(int(amount)))
+
+    def _bridge_perform_window_click_at(
+        self,
+        window: dict,
+        x_frac: float,
+        y_frac: float,
+        bridge_cfg: dict,
+    ) -> tuple[int, int]:
+        """Phone tapped on a snapshot at fractional coords ``x_frac /
+        y_frac`` of the window's region. Translate to screen pixels
+        and fire a left click there.
+
+        No DPI math — the snapshot was captured at the window's
+        physical pixels, so fractions multiply directly back to the
+        same physical coordinate space. Returns the (x, y) actually
+        clicked so the endpoint can echo it back to the phone."""
+        from press_core import click_point
+
+        region = window.get("region")
+        if not region or len(region) != 4:
+            raise RuntimeError("window has no region")
+        rx, ry, rw, rh = (
+            int(region[0]),
+            int(region[1]),
+            int(region[2]),
+            int(region[3]),
+        )
+        target_x = rx + int(round(x_frac * rw))
+        target_y = ry + int(round(y_frac * rh))
+        click_point((target_x, target_y))
+        return (target_x, target_y)
 
     def _bridge_is_rules_running(self) -> bool:
         """Read the engine running flag — called from the bridge's request

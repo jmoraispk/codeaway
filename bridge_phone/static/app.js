@@ -477,6 +477,12 @@ function openLightboxAt(idx) {
   $("lightbox-next").hidden = state.lightboxIdx >= count - 1;
   const counter = $("lightbox-counter");
   counter.textContent = count > 1 ? `${state.lightboxIdx + 1} / ${count}` : "";
+  // Tap-to-click is only meaningful on the newest snapshot. Older
+  // snapshots are stale views — clicking based on them would land
+  // on whatever's there NOW, which may have nothing to do with what
+  // the user is looking at. Hint shows on idx 0, hides otherwise.
+  hideClickCrosshair();
+  $("lightbox-tap-hint").hidden = state.lightboxIdx !== 0;
   $("lightbox").hidden = false;
   // First open in a session pushes a history entry so the phone's back
   // button closes the lightbox instead of exiting the PWA. Subsequent
@@ -504,12 +510,99 @@ function closeLightbox() {
   $("lightbox").hidden = true;
   $("lightbox-img").src = "";
   $("lightbox-counter").textContent = "";
+  hideClickCrosshair();
+  $("lightbox-tap-hint").hidden = true;
   // If we own a history entry, popping it keeps the URL bar in sync
   // and prevents a stale "lightbox" state from sitting on the stack.
   // The popstate handler clears the flag and skips the second close.
   if (state._lightboxPushedHistory) {
     state._lightboxPushedHistory = false;
     try { history.back(); } catch {}
+  }
+}
+
+// ---- Tap-to-click on the newest snapshot --------------------------------
+//
+// User taps the image → crosshair lands at the tap position, Click/Cancel
+// bar appears. Confirming fires POST /api/windows/{id}/click_at with the
+// fractional coords (x / image.naturalWidth, y / image.naturalHeight),
+// which the bridge translates back to physical screen pixels. Available
+// only on the newest snapshot — older snapshots are stale and clicking
+// on them would go to whatever is there NOW, not what the user sees.
+
+state.pendingClick = null;  // {x_frac, y_frac} when crosshair is placed
+
+function hideClickCrosshair() {
+  $("lightbox-crosshair").hidden = true;
+  $("lightbox-click-bar").hidden = true;
+  state.pendingClick = null;
+}
+
+function showClickCrosshair(xFrac, yFrac) {
+  const ch = $("lightbox-crosshair");
+  // The crosshair is positioned via the img's currently-rendered rect,
+  // not the wrap's rect, so letterboxing (object-fit: contain padding)
+  // doesn't shift the cross off the actual pixel the user tapped.
+  const img = $("lightbox-img");
+  const wrap = $("lightbox-img-wrap");
+  const imgRect = img.getBoundingClientRect();
+  const wrapRect = wrap.getBoundingClientRect();
+  const left = imgRect.left - wrapRect.left + xFrac * imgRect.width;
+  const top = imgRect.top - wrapRect.top + yFrac * imgRect.height;
+  ch.style.left = `${left}px`;
+  ch.style.top = `${top}px`;
+  ch.hidden = false;
+  $("lightbox-click-bar").hidden = false;
+  $("lightbox-tap-hint").hidden = true;
+  state.pendingClick = { x_frac: xFrac, y_frac: yFrac };
+}
+
+function handleLightboxTap(clientX, clientY) {
+  // Only the newest snapshot is a valid click target — see
+  // openLightboxAt for the reasoning. Silently ignore taps on older
+  // ones so a stray double-tap during scroll history doesn't fire.
+  if (state.lightboxIdx !== 0) return;
+  const img = $("lightbox-img");
+  if (!img.naturalWidth) return;  // image still loading
+  const rect = img.getBoundingClientRect();
+  const xPx = clientX - rect.left;
+  const yPx = clientY - rect.top;
+  if (xPx < 0 || yPx < 0 || xPx > rect.width || yPx > rect.height) return;
+  const xFrac = Math.max(0, Math.min(1, xPx / rect.width));
+  const yFrac = Math.max(0, Math.min(1, yPx / rect.height));
+  showClickCrosshair(xFrac, yFrac);
+}
+
+async function confirmClickAtCrosshair() {
+  const pending = state.pendingClick;
+  if (!pending || !state.current) return;
+  const btn = $("lightbox-click-confirm");
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "Clicking…";
+  try {
+    const res = await fetch(
+      `/api/windows/${encodeURIComponent(state.current)}/click_at`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(pending),
+      }
+    );
+    if (!res.ok) {
+      const detail = await res.text();
+      alert(`Click failed: ${res.status} ${detail}`);
+      return;
+    }
+    // Success — close the lightbox so the user sees the windows list
+    // updating (busy badge will land via SSE shortly after the click).
+    hideClickCrosshair();
+    closeLightbox();
+  } catch (e) {
+    alert(`Click network error: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
   }
 }
 
@@ -1205,10 +1298,29 @@ $("lightbox-img").addEventListener("touchend", (e) => {
   const t = e.changedTouches[0];
   const dx = t.clientX - _touchStartX;
   const dy = t.clientY - _touchStartY;
+  const startX = _touchStartX;
+  const startY = _touchStartY;
   _touchStartX = null;
-  if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy)) return;
-  lightboxStep(dx < 0 ? 1 : -1);
+  // Horizontal swipe → step through snapshots.
+  if (Math.abs(dx) >= 50 && Math.abs(dx) > Math.abs(dy)) {
+    lightboxStep(dx < 0 ? 1 : -1);
+    return;
+  }
+  // Otherwise, if the gesture barely moved, treat it as a tap and
+  // place the click crosshair (touchend coords; touchstart and
+  // touchend are within ~10 px of each other for a tap).
+  if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
+    handleLightboxTap(t.clientX, t.clientY);
+  }
 }, { passive: true });
+// Desktop browsers (and the dev box) get a plain click handler for
+// the same tap-to-place behaviour — the touch path above doesn't fire
+// on mouse events.
+$("lightbox-img").addEventListener("click", (e) => {
+  handleLightboxTap(e.clientX, e.clientY);
+});
+$("lightbox-click-cancel").addEventListener("click", hideClickCrosshair);
+$("lightbox-click-confirm").addEventListener("click", confirmClickAtCrosshair);
 
 // Browser/phone back: if the lightbox is open and the entry being
 // popped is ours, swallow it as a close. Clearing the flag *before*

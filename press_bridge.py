@@ -58,6 +58,15 @@ class BridgeCallbacks:
     # /api/windows/{id}/scroll so the phone can scroll older messages into
     # view without leaving the bridge UI.
     perform_window_scroll: Optional[Callable[[dict, int, dict], None]] = None
+    # Click an arbitrary point inside the window expressed as fractional
+    # coords (x_frac, y_frac in [0, 1]) of the window's region. Used by
+    # /api/windows/{id}/click_at — phone taps on a snapshot, fractions
+    # round-trip to screen coords via region.x + x_frac * region.w.
+    # DPI doesn't enter the math because the snapshot is captured at
+    # the same physical pixels we're clicking into.
+    perform_window_click_at: Optional[
+        Callable[[dict, float, float, dict], tuple[int, int]]
+    ] = None
     perform_read: Optional[Callable[[str, dict], Optional[str]]] = None
     # Hot-reload hook for /api/admin/reload. The callback is expected to
     # importlib.reload(press_bridge) and restart the FastAPI service so
@@ -1176,6 +1185,71 @@ def build_app(service: BridgeService):
             daemon=True,
         ).start()
         return JSONResponse({"scrolled": amount})
+
+    @app.post("/api/windows/{window_id}/click_at")
+    async def window_click_at(window_id: str, payload: dict) -> JSONResponse:
+        """Click an arbitrary point in the window expressed as
+        fractional coords of the window's region. Body:
+        ``{"x_frac": 0.45, "y_frac": 0.78}``.
+
+        The phone uses this to fire a tap on a multi-choice option
+        (or anywhere else): the user taps on the latest snapshot,
+        the phone computes x_frac / y_frac against the displayed
+        image, and the bridge translates back to physical screen
+        coords via ``region.x + x_frac * region.w`` and the analogous
+        Y. DPI doesn't enter because the snapshot itself was captured
+        at the same physical pixels we're clicking into.
+
+        Triggers a delayed re-detect so the phone sees the resulting
+        busy / state flip without waiting for the next engine tick."""
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="x_frac, y_frac required")
+        try:
+            x_frac = float(payload.get("x_frac"))
+            y_frac = float(payload.get("y_frac"))
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400, detail="x_frac, y_frac must be numbers in [0, 1]"
+            )
+        if not (0.0 <= x_frac <= 1.0 and 0.0 <= y_frac <= 1.0):
+            raise HTTPException(status_code=400, detail="x_frac, y_frac out of range")
+        cfg = service.callbacks.cfg_snapshot()
+        win_cfg = next(
+            (
+                w
+                for w in (cfg.get("bridge") or {}).get("windows", [])
+                if w.get("id") == window_id
+            ),
+            None,
+        )
+        if win_cfg is None:
+            raise HTTPException(status_code=404, detail="window not found")
+        if not win_cfg.get("region"):
+            raise HTTPException(status_code=400, detail="window has no region")
+        if service.callbacks.perform_window_click_at is None:
+            raise HTTPException(status_code=501, detail="click_at not wired")
+        bridge_cfg = cfg.get("bridge") or {}
+        loop = asyncio.get_running_loop()
+        try:
+            target = await loop.run_in_executor(
+                None,
+                service.callbacks.perform_window_click_at,
+                win_cfg,
+                x_frac,
+                y_frac,
+                bridge_cfg,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"click failed: {exc}") from exc
+        # Kick off a delayed snapshot so the phone sees the post-click
+        # state (multi-choice card collapses, agent starts processing)
+        # without waiting for the next engine tick.
+        threading.Thread(
+            target=_post_send_recheck,
+            args=(service, window_id),
+            daemon=True,
+        ).start()
+        return JSONResponse({"clicked": True, "target": list(target) if target else None})
 
     @app.post("/api/windows/{window_id}/snapshot")
     async def window_snapshot(window_id: str) -> JSONResponse:

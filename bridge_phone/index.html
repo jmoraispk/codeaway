@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="stylesheet" href="/static/style.css?v=29">
+  <link rel="stylesheet" href="/static/style.css?v=30">
   <title>auto-press</title>
 </head>
 <body>
@@ -116,9 +116,21 @@
     <button id="lightbox-prev" class="ghost lightbox-nav" aria-label="Previous snapshot">‹</button>
     <button id="lightbox-next" class="ghost lightbox-nav" aria-label="Next snapshot">›</button>
     <span id="lightbox-counter" aria-live="polite"></span>
-    <img id="lightbox-img" alt="">
+    <div id="lightbox-img-wrap" class="lightbox-img-wrap">
+      <img id="lightbox-img" alt="">
+      <div id="lightbox-crosshair" class="lightbox-crosshair" hidden aria-hidden="true">
+        <div class="ch-h"></div>
+        <div class="ch-v"></div>
+        <div class="ch-dot"></div>
+      </div>
+    </div>
+    <div id="lightbox-click-bar" class="lightbox-click-bar" hidden>
+      <button id="lightbox-click-cancel" class="ghost">Cancel</button>
+      <button id="lightbox-click-confirm" class="primary">Click here</button>
+    </div>
+    <div id="lightbox-tap-hint" class="lightbox-tap-hint">Tap to pick a click point</div>
   </div>
 
-  <script src="/static/app.js?v=29"></script>
+  <script src="/static/app.js?v=30"></script>
 </body>
 </html>

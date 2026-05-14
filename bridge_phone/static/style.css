@@ -557,3 +557,104 @@ button.primary {
   pointer-events: none;
 }
 #lightbox-counter:empty { display: none; }
+
+/* Tap-to-click overlay. The image lives inside lightbox-img-wrap so
+   we can absolutely-position the crosshair at the exact pixel inside
+   the rendered image, regardless of letterboxing. The wrap takes the
+   image's natural max-width/height; tap coordinates are computed
+   relative to it. */
+.lightbox-img-wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  max-height: 100%;
+  line-height: 0;  /* no inline-block gap below img */
+}
+.lightbox-img-wrap img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+  display: block;
+  /* Mobile Safari shows a translucent grey tap highlight on any
+     touchable element; muting it keeps the crosshair feeling clean. */
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+.lightbox-crosshair {
+  position: absolute;
+  pointer-events: none;
+  z-index: 2;
+  /* Set via inline style (top, left as percent of wrap dimensions). */
+  width: 0;
+  height: 0;
+}
+.lightbox-crosshair .ch-h,
+.lightbox-crosshair .ch-v {
+  position: absolute;
+  background: rgba(255, 80, 80, 0.95);
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.7);
+}
+.lightbox-crosshair .ch-h {
+  /* horizontal stroke */
+  left: -120px;
+  top: -1px;
+  width: 240px;
+  height: 2px;
+}
+.lightbox-crosshair .ch-v {
+  /* vertical stroke */
+  left: -1px;
+  top: -120px;
+  width: 2px;
+  height: 240px;
+}
+.lightbox-crosshair .ch-dot {
+  position: absolute;
+  left: -8px;
+  top: -8px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 80, 80, 0.95);
+  background: rgba(255, 80, 80, 0.2);
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.7);
+}
+
+.lightbox-click-bar {
+  position: absolute;
+  left: 50%;
+  bottom: calc(20px + var(--safe-bottom));
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.6);
+  padding: 8px 10px;
+  border-radius: 10px;
+  z-index: 3;
+}
+.lightbox-click-bar[hidden] { display: none; }
+.lightbox-click-bar button {
+  min-width: 96px;
+  padding: 10px 14px;
+  font-size: 14px;
+}
+
+.lightbox-tap-hint {
+  position: absolute;
+  bottom: calc(20px + var(--safe-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.5);
+  padding: 5px 12px;
+  border-radius: 999px;
+  pointer-events: none;
+  z-index: 2;
+}
+/* Hide the hint as soon as the user has placed a crosshair — the
+   click bar takes over the same screen real estate. */
+.lightbox-click-bar:not([hidden]) ~ .lightbox-tap-hint,
+#lightbox.click-mode-active .lightbox-tap-hint { display: none; }
