@@ -136,6 +136,16 @@ def default_bridge_config() -> dict:
         # ``windows`` field above on every persist.
         "setups": [],
         "active_setup_id": None,
+        # Web Push: VAPID keypair is generated on first launch via
+        # press_push.ensure_vapid_keys; both halves live here so the
+        # public key stays stable across restarts (otherwise every
+        # phone subscription would silently break). push_subscriptions
+        # is the list of registered phones, each entry shaped
+        # ``{"id": str, "endpoint": str, "keys": {p256dh, auth},
+        # "label": str|None, "created_at": iso}``.
+        "vapid_public_key": None,
+        "vapid_private_key": None,
+        "push_subscriptions": [],
     }
 
 
@@ -376,6 +386,45 @@ def _normalize_bridge(bridge: dict | None) -> dict:
     if isinstance(raw_active, str) and raw_active.strip():
         base["active_setup_id"] = raw_active.strip()
     _ensure_active_setup(base)
+    vpub = bridge.get("vapid_public_key")
+    vprv = bridge.get("vapid_private_key")
+    if isinstance(vpub, str) and vpub.strip():
+        base["vapid_public_key"] = vpub.strip()
+    if isinstance(vprv, str) and vprv.strip():
+        base["vapid_private_key"] = vprv.strip()
+    raw_subs = bridge.get("push_subscriptions")
+    if isinstance(raw_subs, list):
+        clean: list[dict] = []
+        for s in raw_subs:
+            if not isinstance(s, dict):
+                continue
+            endpoint = s.get("endpoint")
+            keys = s.get("keys")
+            if not isinstance(endpoint, str) or not endpoint.strip():
+                continue
+            if not isinstance(keys, dict):
+                continue
+            p256 = keys.get("p256dh")
+            auth = keys.get("auth")
+            if not isinstance(p256, str) or not isinstance(auth, str):
+                continue
+            entry = {
+                "id": (
+                    s.get("id")
+                    if isinstance(s.get("id"), str) and s.get("id").strip()
+                    else uuid.uuid4().hex[:8]
+                ),
+                "endpoint": endpoint.strip(),
+                "keys": {"p256dh": p256, "auth": auth},
+                "label": s.get("label") if isinstance(s.get("label"), str) else None,
+                "created_at": (
+                    s.get("created_at")
+                    if isinstance(s.get("created_at"), str)
+                    else None
+                ),
+            }
+            clean.append(entry)
+        base["push_subscriptions"] = clean
     return base
 
 

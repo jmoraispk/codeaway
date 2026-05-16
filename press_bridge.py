@@ -106,6 +106,19 @@ class BridgeCallbacks:
     #   onto the active setup's ``workspace_id`` field.
     workspace_switch: Optional[Callable[[str], dict]] = None
     workspace_bind_active: Optional[Callable[[], Optional[str]]] = None
+    # Web Push hooks. Each runs on the host side (desktop process)
+    # under the cfg lock so subscription mutations and VAPID key
+    # generation persist via the same save_config path everything
+    # else uses.
+    ensure_vapid_keys: Optional[Callable[[], str]] = None
+    add_push_subscription: Optional[
+        Callable[[dict, Optional[str]], Optional[dict]]
+    ] = None
+    remove_push_subscription: Optional[Callable[[str], int]] = None
+    # Fan-out helper: send the same payload to every registered
+    # subscription. Returns ``{"sent": int, "failed": int,
+    # "pruned": int}`` so the test endpoint can echo a summary.
+    send_push_to_all: Optional[Callable[[dict], dict]] = None
 
 
 # ---- per-window state + snapshot ring buffer ----------------------------
@@ -195,10 +208,21 @@ class WindowStore:
                     entry["snapshots"].append((now, png, None))
                 # Any change in idle OR asking counts as a transition for
                 # SSE / ntfy fan-out — the phone needs to redraw on both.
+                # ``flipped_to_idle`` and ``flipped_to_asking`` carry the
+                # direction so push-notification callers can fire only on
+                # the "X just became true" edges without re-deriving prev
+                # state themselves.
                 if prev is not None and (
                     prev_idle != stored["idle"] or prev_asking != stored["asking"]
                 ):
-                    transitions.append(stored)
+                    entry_tr = dict(stored)
+                    entry_tr["flipped_to_idle"] = (
+                        prev_idle is False and stored["idle"]
+                    )
+                    entry_tr["flipped_to_asking"] = (
+                        prev_asking is False and stored["asking"]
+                    )
+                    transitions.append(entry_tr)
             if prune:
                 # Drop windows that disappeared from config (e.g. user removed).
                 for wid in list(self._windows):
@@ -724,6 +748,37 @@ class BridgeService:
                         daemon=True,
                     ).start()
 
+        # Web Push fan-out. Triggers: window flipped TO asking (multi-
+        # choice prompt), or window flipped TO idle (and isn't asking,
+        # since asking already covered the actionable case). Asking
+        # takes priority over idle in the same tick to avoid double-
+        # notifying the same window.
+        if self.callbacks.send_push_to_all is not None:
+            for tr in transitions:
+                if tr.get("flipped_to_asking"):
+                    payload = {
+                        "title": tr.get("name") or "Cursor",
+                        "body": "Asking — needs your pick.",
+                        "tag": f"asking:{tr.get('id', '')}",
+                        "window_id": tr.get("id"),
+                        "kind": "asking",
+                    }
+                elif tr.get("flipped_to_idle") and not tr.get("asking"):
+                    payload = {
+                        "title": tr.get("name") or "Cursor",
+                        "body": "Idle — ready for input.",
+                        "tag": f"idle:{tr.get('id', '')}",
+                        "window_id": tr.get("id"),
+                        "kind": "idle",
+                    }
+                else:
+                    continue
+                threading.Thread(
+                    target=self._safe_push_fanout,
+                    args=(payload,),
+                    daemon=True,
+                ).start()
+
         # Drain one queued message per just-idle window. We only send one
         # per idle transition because firing it will likely flip the
         # window back to busy; remaining queued messages wait for the
@@ -758,6 +813,18 @@ class BridgeService:
                 _post_send_recheck(self, wid)
 
             threading.Thread(target=_drain, daemon=True).start()
+
+    def _safe_push_fanout(self, payload: dict) -> None:
+        """Run ``send_push_to_all`` from a daemon thread without
+        letting any push-service hiccup blow up the worker. Errors
+        are swallowed to a log line — every individual subscription's
+        delivery is best-effort anyway."""
+        if self.callbacks.send_push_to_all is None:
+            return
+        try:
+            self.callbacks.send_push_to_all(payload)
+        except Exception as exc:
+            LOG.warning("web-push fan-out failed: %s", exc)
 
     def _current_bridge_cfg(self) -> dict:
         try:
@@ -942,6 +1009,84 @@ def build_app(service: BridgeService):
         for s in service.windows.summaries():
             service.hub.publish_typed("window_state", s)
         return JSONResponse({"deleted": True, "setup_id": setup_id})
+
+    @app.get("/api/notifications/vapid-key")
+    async def push_vapid_key() -> JSONResponse:
+        """Public VAPID key the phone passes to PushManager.subscribe.
+        Generated on first call and persisted in the bridge config so
+        it stays stable across restarts — rotating it would silently
+        invalidate every existing subscription."""
+        if service.callbacks.ensure_vapid_keys is None:
+            raise HTTPException(status_code=501, detail="push not wired")
+        try:
+            public_key = service.callbacks.ensure_vapid_keys()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse({"public_key": public_key})
+
+    @app.post("/api/notifications/subscribe")
+    async def push_subscribe(payload: dict) -> JSONResponse:
+        """Register the phone's PushSubscription JSON. Body matches
+        the shape ``PushSubscription.toJSON()`` returns (endpoint +
+        keys.{p256dh, auth}); we trim to those fields. Idempotent —
+        re-subscribing with the same endpoint updates instead of
+        duplicating."""
+        if service.callbacks.add_push_subscription is None:
+            raise HTTPException(status_code=501, detail="push not wired")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="subscription JSON required")
+        # Caller may wrap as {"subscription": {...}, "label": "..."}
+        # or pass the bare PushSubscription dict — accept both.
+        sub_data = payload.get("subscription") if "subscription" in payload else payload
+        label = payload.get("label") if isinstance(payload.get("label"), str) else None
+        try:
+            entry = service.callbacks.add_push_subscription(sub_data, label)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if entry is None:
+            raise HTTPException(status_code=400, detail="malformed subscription")
+        return JSONResponse(
+            {"id": entry["id"], "endpoint_hash": entry["endpoint"][-12:]}
+        )
+
+    @app.delete("/api/notifications/subscribe")
+    async def push_unsubscribe(payload: dict) -> JSONResponse:
+        """Drop a subscription. Body: ``{"endpoint": "https://..."}``
+        — phone passes the endpoint it owns so it doesn't need to
+        remember the subscription id we generated."""
+        if service.callbacks.remove_push_subscription is None:
+            raise HTTPException(status_code=501, detail="push not wired")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="endpoint required")
+        endpoint = payload.get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint.strip():
+            raise HTTPException(status_code=400, detail="endpoint required")
+        try:
+            removed = service.callbacks.remove_push_subscription(endpoint.strip())
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse({"removed": int(removed)})
+
+    @app.post("/api/notifications/test")
+    async def push_test() -> JSONResponse:
+        """Send a smoke-test notification to every registered phone.
+        Useful for verifying the round-trip works after subscribing
+        without waiting for a real busy→idle transition."""
+        if service.callbacks.send_push_to_all is None:
+            raise HTTPException(status_code=501, detail="push not wired")
+        try:
+            stats = service.callbacks.send_push_to_all(
+                {
+                    "title": "auto-press test",
+                    "body": "Web Push is working.",
+                    "tag": "test",
+                }
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse(stats)
 
     @app.post("/api/bridge/workspace/switch")
     async def workspace_switch_endpoint(payload: dict) -> JSONResponse:
@@ -1531,6 +1676,26 @@ def build_app(service: BridgeService):
                 return response
 
         app.mount("/static", _NoCacheStatic(directory=str(static_dir)), name="static")
+
+    @app.get("/sw.js")
+    async def service_worker() -> Response:
+        """Serve the service worker from the root so its scope covers
+        the whole PWA. Browsers cap a SW's scope to the directory of
+        the file that served it, so this can't live under /static/."""
+        sw = PHONE_DIR / "sw.js"
+        if not sw.exists():
+            return PlainTextResponse("sw missing", status_code=404)
+        return FileResponse(
+            sw,
+            media_type="application/javascript",
+            headers={
+                # SWs are aggressively cached by browsers. no-cache
+                # forces revalidation each load so a deploy lands
+                # without users having to manually unregister.
+                "Cache-Control": "no-cache, must-revalidate",
+                "Service-Worker-Allowed": "/",
+            },
+        )
 
     @app.get("/manifest.webmanifest")
     async def manifest() -> Response:

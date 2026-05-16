@@ -597,6 +597,44 @@ def fastapi_client():
         calls.setdefault("setup_deletes", []).append((setup_id, ok))
         return ok
 
+    def ensure_vapid_keys():
+        # Stable fake key — tests only check that the endpoint
+        # returns *some* string, not that it's a real ECDH point.
+        calls.setdefault("vapid_called", 0)
+        calls["vapid_called"] += 1
+        return "BMockPublicKey"
+
+    def add_push_subscription(raw, label):
+        from press_push import normalize_subscription
+        clean = normalize_subscription(raw)
+        if clean is None:
+            return None
+        entry = {
+            "id": f"sub{len(calls.setdefault('push_subs', []))}",
+            "endpoint": clean["endpoint"],
+            "keys": clean["keys"],
+            "label": label,
+        }
+        # Idempotent: replace existing entry for same endpoint.
+        calls["push_subs"] = [
+            s for s in calls["push_subs"] if s["endpoint"] != clean["endpoint"]
+        ] + [entry]
+        return entry
+
+    def remove_push_subscription(endpoint):
+        subs = calls.setdefault("push_subs", [])
+        before = len(subs)
+        calls["push_subs"] = [s for s in subs if s["endpoint"] != endpoint]
+        return before - len(calls["push_subs"])
+
+    def send_push_to_all(payload):
+        # Test stub records the payload and reports "all sent" so
+        # the test endpoint round-trip is exercised without doing
+        # real Web Push.
+        calls.setdefault("push_payloads", []).append(payload)
+        sent = len(calls.get("push_subs", []))
+        return {"sent": sent, "failed": 0, "pruned": 0}
+
     callbacks = BridgeCallbacks(
         cfg_snapshot=cfg_snapshot,
         re_match_rule=re_match_rule,
@@ -611,6 +649,10 @@ def fastapi_client():
         new_bridge_setup=new_bridge_setup,
         activate_bridge_setup=activate_bridge_setup,
         delete_bridge_setup=delete_bridge_setup,
+        ensure_vapid_keys=ensure_vapid_keys,
+        add_push_subscription=add_push_subscription,
+        remove_push_subscription=remove_push_subscription,
+        send_push_to_all=send_push_to_all,
     )
     service = BridgeService(callbacks)
     app = build_app(service)
@@ -1581,3 +1623,141 @@ def test_click_at_501_when_callback_unwired(fastapi_client):
         json={"x_frac": 0.5, "y_frac": 0.5},
     )
     assert res.status_code == 501
+
+
+# ---- Web Push notifications ----------------------------------------------
+
+_SAMPLE_SUB = {
+    "endpoint": "https://example.push.example/abc",
+    "keys": {
+        "p256dh": "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM",
+        "auth": "tBHItJI5svbpez7KI4CCXg",
+    },
+}
+
+
+def test_vapid_key_endpoint_returns_public_key(fastapi_client):
+    client, service, calls = fastapi_client
+    res = client.get("/api/notifications/vapid-key")
+    assert res.status_code == 200
+    body = res.json()
+    assert isinstance(body.get("public_key"), str) and body["public_key"]
+    assert calls["vapid_called"] == 1
+
+
+def test_subscribe_endpoint_persists_subscription(fastapi_client):
+    client, service, calls = fastapi_client
+    res = client.post(
+        "/api/notifications/subscribe",
+        json={"subscription": _SAMPLE_SUB, "label": "Pixel 8"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert "id" in body and "endpoint_hash" in body
+    [stored] = calls["push_subs"]
+    assert stored["endpoint"] == _SAMPLE_SUB["endpoint"]
+    assert stored["label"] == "Pixel 8"
+
+
+def test_subscribe_endpoint_idempotent_on_repeat(fastapi_client):
+    client, service, calls = fastapi_client
+    client.post("/api/notifications/subscribe", json={"subscription": _SAMPLE_SUB})
+    res = client.post(
+        "/api/notifications/subscribe", json={"subscription": _SAMPLE_SUB}
+    )
+    assert res.status_code == 200
+    # Re-subscribing the same endpoint must replace, not duplicate.
+    assert len(calls["push_subs"]) == 1
+
+
+def test_subscribe_endpoint_400_on_malformed(fastapi_client):
+    client, service, calls = fastapi_client
+    res = client.post("/api/notifications/subscribe", json={"subscription": {}})
+    assert res.status_code == 400
+
+
+def test_subscribe_accepts_bare_subscription_dict(fastapi_client):
+    """The phone may send the PushSubscription JSON directly without
+    wrapping it under `subscription`."""
+    client, service, calls = fastapi_client
+    res = client.post("/api/notifications/subscribe", json=_SAMPLE_SUB)
+    assert res.status_code == 200
+    assert len(calls["push_subs"]) == 1
+
+
+def test_unsubscribe_endpoint_drops_by_endpoint(fastapi_client):
+    client, service, calls = fastapi_client
+    client.post("/api/notifications/subscribe", json={"subscription": _SAMPLE_SUB})
+    res = client.request(
+        "DELETE",
+        "/api/notifications/subscribe",
+        json={"endpoint": _SAMPLE_SUB["endpoint"]},
+    )
+    assert res.status_code == 200
+    assert res.json()["removed"] == 1
+    assert calls["push_subs"] == []
+
+
+def test_window_store_transition_carries_flipped_flags():
+    """The transition entries returned by WindowStore.update must
+    include flipped_to_idle / flipped_to_asking so the push fan-out
+    only fires on actual edges, not on every state churn."""
+    from press_bridge import WindowStore
+
+    store = WindowStore()
+    # First tick — no prior state, no transition emitted.
+    assert store.update(
+        [{"id": "w1", "name": "Cursor", "idle": False, "asking": False, "configured": True}],
+        {},
+    ) == []
+    # Busy → idle.
+    trs = store.update(
+        [{"id": "w1", "name": "Cursor", "idle": True, "asking": False, "configured": True}],
+        {},
+    )
+    assert len(trs) == 1
+    assert trs[0]["flipped_to_idle"] is True
+    assert trs[0]["flipped_to_asking"] is False
+    # Idle → asking (while still idle).
+    trs = store.update(
+        [{"id": "w1", "name": "Cursor", "idle": True, "asking": True, "configured": True}],
+        {},
+    )
+    assert len(trs) == 1
+    assert trs[0]["flipped_to_idle"] is False  # was already idle
+    assert trs[0]["flipped_to_asking"] is True
+
+
+def test_press_push_normalize_subscription():
+    from press_push import normalize_subscription
+
+    assert normalize_subscription(None) is None
+    assert normalize_subscription({}) is None
+    # Missing keys block.
+    assert normalize_subscription({"endpoint": "https://x"}) is None
+    # Valid shape.
+    sub = normalize_subscription(
+        {
+            "endpoint": "https://x.example/foo",
+            "keys": {"p256dh": "pubkey", "auth": "secret"},
+            "expirationTime": None,
+            "extra": "dropped",
+        }
+    )
+    assert sub == {
+        "endpoint": "https://x.example/foo",
+        "keys": {"p256dh": "pubkey", "auth": "secret"},
+    }
+
+
+def test_test_push_endpoint_returns_summary(fastapi_client):
+    client, service, calls = fastapi_client
+    client.post("/api/notifications/subscribe", json={"subscription": _SAMPLE_SUB})
+    res = client.post("/api/notifications/test")
+    assert res.status_code == 200
+    body = res.json()
+    assert body == {"sent": 1, "failed": 0, "pruned": 0}
+    # Test payload propagated to the fan-out callback.
+    [payload] = calls["push_payloads"]
+    assert payload["title"] == "auto-press test"
+    assert payload["tag"] == "test"

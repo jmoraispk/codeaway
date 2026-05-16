@@ -18,6 +18,12 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "httpx>=0.27",
+    # Web Push notifications. pywebpush handles VAPID-signed POSTs to
+    # Apple / Google / Mozilla push services; cryptography is what
+    # pywebpush uses to sign and to generate the VAPID keypair on
+    # first launch.
+    "pywebpush>=2.0.0",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

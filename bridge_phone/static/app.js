@@ -730,44 +730,133 @@ function renderNotifToggle() {
 }
 
 function maybeNotify(prev, next) {
-  // Only fire on a real busy → idle transition while the toggle is on.
-  if (!state.notifEnabled) return;
-  if (!prev || prev.idle === next.idle) return;
-  if (!next.idle) return;
-  if (typeof Notification === "undefined") return;
-  if (Notification.permission !== "granted") return;
+  // No-op now: Web Push delivers transition notifications via the
+  // service worker so they fire even when the PWA is closed. Kept
+  // as a stub because the SSE handler still calls it — left as a
+  // future hook if we ever want in-app toast banners while the PWA
+  // is foreground.
+}
+
+// ---- Web Push subscription helpers --------------------------------------
+//
+// Subscribe: ask the OS push service for an endpoint (uses VAPID public
+// key from the bridge), POST the subscription JSON back so the bridge
+// can deliver pushes. Unsubscribe: ask the push service to drop the
+// endpoint, then tell the bridge to forget it. The "notifications" toggle
+// just calls these two depending on its current state.
+
+function urlBase64ToUint8Array(b64) {
+  // VAPID public keys come back as URL-safe base64 without padding.
+  // PushManager.subscribe wants a Uint8Array.
+  const padded = b64 + "==".slice((b64.length + 2) % 4);
+  const ascii = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+  const arr = new Uint8Array(ascii.length);
+  for (let i = 0; i < ascii.length; i++) arr[i] = ascii.charCodeAt(i);
+  return arr;
+}
+
+async function ensureServiceWorker() {
+  if (!("serviceWorker" in navigator)) {
+    throw new Error("Service workers not supported in this browser.");
+  }
+  // Scope is root so the SW controls the whole PWA. /sw.js itself is
+  // served with Service-Worker-Allowed: / by the bridge.
+  return navigator.serviceWorker.register("/sw.js", { scope: "/" });
+}
+
+async function subscribePush() {
+  if (typeof Notification === "undefined") {
+    throw new Error("This browser doesn't expose the Notification API.");
+  }
+  if (Notification.permission === "denied") {
+    throw new Error(
+      "Notifications are blocked for this site. Enable them in browser settings, then try again."
+    );
+  }
+  if (Notification.permission !== "granted") {
+    const result = await Notification.requestPermission();
+    if (result !== "granted") throw new Error("Permission not granted.");
+  }
+  const reg = await ensureServiceWorker();
+  // Make sure the SW is fully active before we subscribe — calling
+  // subscribe on a still-installing SW can produce a 'pending' state
+  // on some browsers.
+  await navigator.serviceWorker.ready;
+
+  // Fetch the bridge's VAPID public key. Cached after first call —
+  // it doesn't rotate.
+  const keyRes = await fetch("/api/notifications/vapid-key");
+  if (!keyRes.ok) {
+    throw new Error(`Couldn't fetch VAPID key (${keyRes.status})`);
+  }
+  const { public_key } = await keyRes.json();
+  if (!public_key) throw new Error("Bridge has no VAPID key.");
+
+  const subscription = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(public_key),
+  });
+  // Persist server-side. Bridge dedupes by endpoint, so re-subscribing
+  // is idempotent.
+  const subRes = await fetch("/api/notifications/subscribe", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      subscription: subscription.toJSON(),
+      label: navigator.userAgent.slice(0, 80),
+    }),
+  });
+  if (!subRes.ok) {
+    const detail = await subRes.text();
+    throw new Error(`Subscribe failed: ${subRes.status} ${detail}`);
+  }
+  return subscription;
+}
+
+async function unsubscribePush() {
+  if (!("serviceWorker" in navigator)) return;
   try {
-    const n = new Notification(next.name || "Cursor", {
-      body: "is idle — ready for input",
-      icon: "/static/favicon.svg",
-      tag: `idle-${next.id}`,    // dedupe rapid duplicates
-    });
-    n.onclick = () => { window.focus(); n.close(); };
+    const reg = await navigator.serviceWorker.getRegistration("/");
+    if (!reg) return;
+    const sub = await reg.pushManager.getSubscription();
+    if (!sub) return;
+    const endpoint = sub.endpoint;
+    // Tell the bridge to drop the entry first (so we don't keep
+    // trying to deliver to a phone that no longer has the SW
+    // subscribed), then unsubscribe locally.
+    try {
+      await fetch("/api/notifications/subscribe", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ endpoint }),
+      });
+    } catch {}
+    await sub.unsubscribe();
   } catch {}
 }
 
 async function toggleNotifications() {
-  if (state.notifEnabled) {
-    state.notifEnabled = false;
-    localStorage.setItem("ap.notif", "0");
+  const btn = $("notif-toggle");
+  btn.disabled = true;
+  try {
+    if (state.notifEnabled) {
+      await unsubscribePush();
+      state.notifEnabled = false;
+      localStorage.setItem("ap.notif", "0");
+    } else {
+      try {
+        await subscribePush();
+      } catch (e) {
+        alert(e.message || "Couldn't enable notifications.");
+        return;
+      }
+      state.notifEnabled = true;
+      localStorage.setItem("ap.notif", "1");
+    }
     renderNotifToggle();
-    return;
+  } finally {
+    btn.disabled = false;
   }
-  if (typeof Notification === "undefined") {
-    alert("This browser doesn't expose the Notification API.");
-    return;
-  }
-  if (Notification.permission === "denied") {
-    alert("Notifications are blocked for this site. Enable them in browser settings.");
-    return;
-  }
-  if (Notification.permission !== "granted") {
-    const result = await Notification.requestPermission();
-    if (result !== "granted") return;
-  }
-  state.notifEnabled = true;
-  localStorage.setItem("ap.notif", "1");
-  renderNotifToggle();
 }
 
 // ---- Setups (named window layouts) -------------------------------------
@@ -1186,6 +1275,53 @@ $("settings-btn").addEventListener("click", () => {
   $("settings-btn").setAttribute("aria-expanded", String(!panel.hidden));
 });
 $("notif-toggle").addEventListener("click", toggleNotifications);
+$("notif-test").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Sending…";
+  try {
+    const res = await fetch("/api/notifications/test", { method: "POST" });
+    if (!res.ok) {
+      alert(`Test failed: ${res.status} ${await res.text()}`);
+      return;
+    }
+    const data = await res.json();
+    if (data.sent === 0 && data.failed === 0) {
+      alert("No subscriptions registered yet — turn Notifications on first.");
+    } else if (data.sent === 0) {
+      alert(`Push failed for all ${data.failed} subscription(s). Check the bridge log.`);
+    }
+  } catch (err) {
+    alert(`Test network error: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+});
+
+// Reconcile the toggle with the actual SW subscription state on load.
+// localStorage's flag can drift if the user toggled in another tab, or
+// if the OS-level permission was revoked between sessions — in either
+// case we want the visible toggle to match reality, not the stored
+// guess.
+(async () => {
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    // Register early so the SW is alive for any notification click
+    // that happens later, even if the user hasn't toggled today.
+    await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    const reg = await navigator.serviceWorker.getRegistration("/");
+    if (!reg) return;
+    const sub = await reg.pushManager.getSubscription();
+    const reallySubscribed = !!sub && Notification.permission === "granted";
+    if (reallySubscribed !== state.notifEnabled) {
+      state.notifEnabled = reallySubscribed;
+      localStorage.setItem("ap.notif", reallySubscribed ? "1" : "0");
+      renderNotifToggle();
+    }
+  } catch {}
+})();
 $("autoreload-toggle").addEventListener("click", toggleAutoReload);
 $("reload-btn").addEventListener("click", reloadBridge);
 $("auto-detect-btn").addEventListener("click", autoDetectWindows);

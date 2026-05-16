@@ -3619,6 +3619,10 @@ class MainWindow(QMainWindow):
             delete_bridge_setup=self._bridge_delete_setup,
             workspace_switch=self._bridge_workspace_switch,
             workspace_bind_active=self._bridge_workspace_bind_active,
+            ensure_vapid_keys=self._bridge_ensure_vapid_keys,
+            add_push_subscription=self._bridge_add_push_subscription,
+            remove_push_subscription=self._bridge_remove_push_subscription,
+            send_push_to_all=self._bridge_send_push_to_all,
         )
         self._bridge = BridgeService(callbacks)
         self._bridge.start(bridge_cfg)
@@ -3975,6 +3979,104 @@ class MainWindow(QMainWindow):
                 self._persist()
                 self.bridge_setups_changed_remote.emit("workspace-switch")
         return {"workspace_id": new_wid, "active_setup_id": activated_id}
+
+    def _bridge_ensure_vapid_keys(self) -> str:
+        """Generate the VAPID keypair on first call, persist both
+        halves to config, and return the public key the phone uses
+        for ``PushManager.subscribe``."""
+        from press_push import ensure_vapid_keys
+
+        with self._cfg_lock:
+            bridge = self._cfg.setdefault("bridge", {})
+            public, _private = ensure_vapid_keys(bridge)
+        self._persist()
+        return public
+
+    def _bridge_add_push_subscription(
+        self, raw: dict, label: Optional[str]
+    ) -> Optional[dict]:
+        """Persist a phone's PushSubscription. Idempotent — a re-
+        subscribe with the same endpoint replaces the previous entry
+        in place (which also refreshes its created_at timestamp)."""
+        from datetime import datetime as _dt
+        import uuid as _uuid
+
+        from press_push import normalize_subscription
+
+        clean = normalize_subscription(raw)
+        if clean is None:
+            return None
+        entry = {
+            "id": _uuid.uuid4().hex[:8],
+            "endpoint": clean["endpoint"],
+            "keys": clean["keys"],
+            "label": label,
+            "created_at": _dt.utcnow().isoformat() + "Z",
+        }
+        with self._cfg_lock:
+            subs = self._cfg.setdefault("bridge", {}).setdefault(
+                "push_subscriptions", []
+            )
+            # Replace any existing subscription for the same endpoint
+            # so a re-subscribe doesn't duplicate.
+            subs[:] = [s for s in subs if s.get("endpoint") != clean["endpoint"]]
+            subs.append(entry)
+        self._persist()
+        return entry
+
+    def _bridge_remove_push_subscription(self, endpoint: str) -> int:
+        """Drop every subscription matching ``endpoint``. Returns
+        the count removed."""
+        with self._cfg_lock:
+            subs = (self._cfg.get("bridge", {}) or {}).get(
+                "push_subscriptions", []
+            )
+            before = len(subs)
+            self._cfg["bridge"]["push_subscriptions"] = [
+                s for s in subs if s.get("endpoint") != endpoint
+            ]
+            removed = before - len(self._cfg["bridge"]["push_subscriptions"])
+        if removed:
+            self._persist()
+        return removed
+
+    def _bridge_send_push_to_all(self, payload: dict) -> dict:
+        """Deliver ``payload`` to every registered phone. Subscriptions
+        that come back 404/410 are pruned from config (the user
+        revoked permission or uninstalled the PWA). Returns a
+        ``{sent, failed, pruned}`` summary the test endpoint echoes
+        back to the caller."""
+        from press_push import send_push
+
+        with self._cfg_lock:
+            bridge = self._cfg.get("bridge", {}) or {}
+            subs = list(bridge.get("push_subscriptions") or [])
+            # Snapshot the bridge dict so send_push (which may read
+            # VAPID keys + subject) doesn't race with concurrent
+            # mutations. We're outside the lock for the actual HTTP
+            # POSTs — those can be slow.
+            bridge_snapshot = dict(bridge)
+        sent = 0
+        failed = 0
+        gone_endpoints: list[str] = []
+        for s in subs:
+            ok, gone = send_push(s, payload, bridge_snapshot)
+            if ok:
+                sent += 1
+            else:
+                failed += 1
+            if gone:
+                gone_endpoints.append(s.get("endpoint"))
+        pruned = 0
+        if gone_endpoints:
+            with self._cfg_lock:
+                live = self._cfg["bridge"].get("push_subscriptions", []) or []
+                self._cfg["bridge"]["push_subscriptions"] = [
+                    s for s in live if s.get("endpoint") not in gone_endpoints
+                ]
+                pruned = len(gone_endpoints)
+            self._persist()
+        return {"sent": sent, "failed": failed, "pruned": pruned}
 
     def _bridge_workspace_bind_active(self) -> Optional[str]:
         """POST /api/bridge/workspace/bind — stamp the current
