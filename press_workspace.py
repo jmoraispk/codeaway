@@ -143,6 +143,9 @@ if IS_WINDOWS:
     _GetWindowDesktopId_t = ctypes.WINFUNCTYPE(
         c_int, c_void_p, HWND, POINTER(_GUID)
     )
+    _IsWindowOnCurrentVirtualDesktop_t = ctypes.WINFUNCTYPE(
+        c_int, c_void_p, HWND, POINTER(BOOL)
+    )
 
     def _call_vtbl(this_ptr: c_void_p, slot: int, fn_type):
         """Resolve and bind a vtable slot. Returns a callable that
@@ -194,6 +197,53 @@ def current_id() -> Optional[str]:
             LOG.warning("GetWindowDesktopId failed: 0x%08x", hr & 0xFFFFFFFF)
             return None
         return _guid_to_string(guid_out)
+    finally:
+        try:
+            release = _call_vtbl(mgr, _VTBL_RELEASE, _Release_t)
+            release(mgr)
+        except Exception:
+            pass
+
+
+def filter_to_current_workspace(hwnds) -> Optional[set]:
+    """Return the subset of ``hwnds`` that's on the foreground virtual
+    desktop. ``None`` on non-Windows or if the COM service is
+    unavailable — callers should fall back to keeping every HWND in
+    that case (better to over-include than to silently drop the
+    user's actual windows).
+
+    Uses ``IVirtualDesktopManager.IsWindowOnCurrentVirtualDesktop``,
+    which is what Windows itself uses to decide which windows render
+    on the current desktop. ``IsWindowVisible`` doesn't help here —
+    it returns True for windows on every desktop, since Windows
+    treats them as "non-hidden", just rendered elsewhere.
+
+    Creates ONE manager instance and reuses it across the queries
+    so an N-window enumeration pays one CoCreateInstance, not N.
+    """
+    if not IS_WINDOWS:
+        return None
+    mgr = _create_manager()
+    if not mgr:
+        return None
+    try:
+        is_on = _call_vtbl(
+            mgr, _VTBL_IS_ON_CURRENT, _IsWindowOnCurrentVirtualDesktop_t
+        )
+        keep: set[int] = set()
+        for h in hwnds:
+            try:
+                hwnd_int = int(h)
+            except (TypeError, ValueError):
+                continue
+            out = BOOL(False)
+            try:
+                hr = is_on(mgr, hwnd_int, byref(out))
+            except Exception:
+                continue
+            if hr == 0 and out.value:
+                keep.add(hwnd_int)
+        return keep
     finally:
         try:
             release = _call_vtbl(mgr, _VTBL_RELEASE, _Release_t)

@@ -124,6 +124,21 @@ def list_cursor_windows() -> list[dict]:
         # If EnumWindows itself blows up, return whatever we got so far
         # rather than crashing the bridge / UI.
         pass
+    # Filter to the foreground virtual desktop. IsWindowVisible doesn't
+    # distinguish "rendered here" from "rendered on another desktop" —
+    # both return True. Without this filter, a user with 3 Cursors on
+    # desktop A and 3 on desktop B would see all 6 listed as if they
+    # were on the current one. None return = filter unavailable on
+    # this platform / API failure → keep everything (safer than
+    # silently dropping the user's actual windows).
+    try:
+        from press_workspace import filter_to_current_workspace
+
+        keep = filter_to_current_workspace([w["hwnd"] for w in out])
+    except Exception:
+        keep = None
+    if keep is not None:
+        out = [w for w in out if w["hwnd"] in keep]
     # Sort left-to-right, then top-to-bottom — matches how the user
     # would scan a tiled monitor and makes auto-generated #1, #2, etc.
     # names line up with what they see.
