@@ -48,33 +48,19 @@ def default_rule(name: str = "New Rule") -> dict:
     }
 
 
-def default_setup(name: str = "Default") -> dict:
-    """A named window layout the user can switch between.
-
-    Each setup owns its own windows list. The live ``bridge.windows``
-    is a working copy of the active setup's windows — every persist
-    mirrors it back into the active setup, so switching setups never
-    loses edits. There is always at least one setup, and exactly one
-    of them is active (``bridge.active_setup_id``).
-
-    ``workspace_id`` (optional) is the Windows virtual-desktop GUID
-    string this setup is bound to. When the foreground workspace
-    changes, the bridge auto-activates the setup whose ``workspace_id``
-    matches — so each virtual desktop can have its own set of
-    Cursor windows.
-    """
-    return {
-        "id": uuid.uuid4().hex[:8],
-        "name": name,
-        "windows": [],
-        "workspace_id": None,
-    }
-
-
 def default_bridge_window(name: str = "Cursor") -> dict:
-    """A single Cursor window the bridge should monitor.
+    """A single Cursor window the bridge monitors.
 
-    region          — whole-window bbox in physical pixels [x, y, w, h]
+    The window list is rebuilt by auto-detect — there's no manual
+    "Add window" path anymore. Each entry is the HWND-keyed view of
+    a Cursor window currently on the user's foreground workspace.
+
+    hwnd            — Win32 HWND. Stable while Cursor stays open; the
+                       HWND-keyed merge inside auto-detect preserves
+                       user-edited fields (name, chat_target) for as
+                       long as the HWND is alive.
+    region          — whole-window bbox in physical pixels [x, y, w, h],
+                       re-read from GetWindowRect on every auto-detect
     chat_target     — click point for the chat input [x, y]; defaults to
                        the centre of the bottom 20% of `region` if None
     read_region     — area to snapshot as a PNG so the phone can show
@@ -82,6 +68,7 @@ def default_bridge_window(name: str = "Cursor") -> dict:
     """
     return {
         "id": uuid.uuid4().hex[:8],
+        "hwnd": None,
         "name": name,
         "region": None,
         "chat_target": None,
@@ -124,18 +111,12 @@ def default_bridge_config() -> dict:
         # Captured the same way as the idle template via the Bridge tab.
         "askuser_template_path": None,
         "askuser_template_source_dpi": None,
-        # Cursor windows the bridge watches; empty list = bridge has nothing
-        # useful to do. Each entry is a default_bridge_window() dict. This
-        # is a working copy of the active setup's windows — every save
-        # mirrors it back into the active setup so switching never loses
-        # edits.
+        # Cursor windows the bridge watches. Rebuilt by auto-detect on
+        # bridge start, manual button, and workspace change — there's
+        # no manual add/remove path. The HWND-keyed merge inside
+        # auto-detect preserves user-edited fields (renamed names,
+        # chat_target overrides) across re-detects.
         "windows": [],
-        # Named layouts the user can switch between. Always at least one;
-        # exactly one is active. The active setup's id lives in
-        # ``active_setup_id``; its window list is mirrored into the
-        # ``windows`` field above on every persist.
-        "setups": [],
-        "active_setup_id": None,
         # Web Push: VAPID keypair is generated on first launch via
         # press_push.ensure_vapid_keys; both halves live here so the
         # public key stays stable across restarts (otherwise every
@@ -247,27 +228,6 @@ def _normalize_rule(rule: dict, priority: int) -> dict:
     return base
 
 
-def _normalize_setup(setup: dict | None) -> dict:
-    """Coerce an arbitrary dict into a valid setup. Missing / blank
-    fields fall back to defaults; the windows list is run through the
-    standard window normaliser so legacy saved setups load cleanly."""
-    base = default_setup()
-    if isinstance(setup, dict):
-        sid = setup.get("id")
-        if isinstance(sid, str) and sid.strip():
-            base["id"] = sid.strip()
-        name = setup.get("name")
-        if isinstance(name, str) and name.strip():
-            base["name"] = name.strip()
-        raw = setup.get("windows")
-        if isinstance(raw, list):
-            base["windows"] = [_normalize_window(w) for w in raw]
-        wid = setup.get("workspace_id")
-        if isinstance(wid, str) and wid.strip():
-            base["workspace_id"] = wid.strip()
-    return base
-
-
 def _normalize_window(window: dict | None) -> dict:
     base = default_bridge_window()
     if isinstance(window, dict):
@@ -286,6 +246,13 @@ def _normalize_window(window: dict | None) -> dict:
         base["chat_target"] = None
     if not _valid_region(base.get("read_region")):
         base["read_region"] = None
+    # HWND is opaque to us — just check it's an int. None when the
+    # entry came from a legacy config that predates dynamic tracking.
+    try:
+        h = base.get("hwnd")
+        base["hwnd"] = int(h) if h is not None else None
+    except (TypeError, ValueError):
+        base["hwnd"] = None
     return base
 
 
@@ -379,13 +346,21 @@ def _normalize_bridge(bridge: dict | None) -> dict:
     raw_windows = bridge.get("windows")
     if isinstance(raw_windows, list):
         base["windows"] = [_normalize_window(w) for w in raw_windows]
-    raw_setups = bridge.get("setups")
-    if isinstance(raw_setups, list):
-        base["setups"] = [_normalize_setup(s) for s in raw_setups]
-    raw_active = bridge.get("active_setup_id")
-    if isinstance(raw_active, str) and raw_active.strip():
-        base["active_setup_id"] = raw_active.strip()
-    _ensure_active_setup(base)
+    # Legacy migration: if the loaded config has setups + active_setup_id
+    # (pre-simplification schema), keep whichever windows the active
+    # setup carried. ``bridge.windows`` already mirrored the active
+    # setup on save, so usually it's a no-op — but if the live windows
+    # are empty and we have setups, surface the first setup's windows
+    # so the user doesn't lose what they had before the upgrade.
+    if not base["windows"]:
+        legacy_setups = bridge.get("setups") if isinstance(bridge.get("setups"), list) else []
+        legacy_active = bridge.get("active_setup_id")
+        chosen = next(
+            (s for s in legacy_setups if isinstance(s, dict) and s.get("id") == legacy_active),
+            None,
+        ) or (legacy_setups[0] if legacy_setups else None)
+        if chosen and isinstance(chosen.get("windows"), list):
+            base["windows"] = [_normalize_window(w) for w in chosen["windows"]]
     vpub = bridge.get("vapid_public_key")
     vprv = bridge.get("vapid_private_key")
     if isinstance(vpub, str) and vpub.strip():
@@ -426,43 +401,6 @@ def _normalize_bridge(bridge: dict | None) -> dict:
             clean.append(entry)
         base["push_subscriptions"] = clean
     return base
-
-
-def _ensure_active_setup(bridge: dict) -> None:
-    """Guarantee bridge has at least one setup with a valid active id.
-
-    Migration paths:
-      - No setups, windows non-empty → wrap them in a "Default" setup.
-      - No setups, no windows → create empty "Default".
-      - Setups exist but active_setup_id is missing / stale → wrap the
-        current ``windows`` as a new "Current" setup so the user's live
-        view is preserved alongside existing saved layouts.
-    """
-    setups = bridge.setdefault("setups", [])
-    windows = bridge.setdefault("windows", [])
-    valid_ids = {s.get("id") for s in setups}
-    active_id = bridge.get("active_setup_id")
-    if active_id in valid_ids:
-        return
-    if not setups:
-        setup = default_setup("Default")
-        setup["windows"] = [dict(w) for w in windows]
-        setups.append(setup)
-        bridge["active_setup_id"] = setup["id"]
-        return
-    # Setups exist but none active. If live windows are non-empty,
-    # preserve them as a new "Current" setup so the user doesn't
-    # lose what they're looking at. Otherwise just activate the
-    # first existing setup.
-    if windows:
-        setup = default_setup("Current")
-        setup["windows"] = [dict(w) for w in windows]
-        setups.insert(0, setup)
-        bridge["active_setup_id"] = setup["id"]
-    else:
-        first = setups[0]
-        bridge["active_setup_id"] = first.get("id")
-        bridge["windows"] = [dict(w) for w in first.get("windows", [])]
 
 
 def normalize_config(config: dict | None) -> dict:
@@ -535,7 +473,6 @@ def _self_heal_template_bundles(cfg: dict) -> None:
 
 def save_config(config: dict) -> None:
     ensure_templates_dir()
-    sync_active_setup(config)
     normalized = normalize_config(config)
     CONFIG_PATH.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
 
@@ -962,99 +899,64 @@ def make_rule_summary(rule: dict, last_score: float | None = None) -> str:
     return f"{rule.get('priority', '?')}. {rule.get('name', 'Rule')} [{enabled}] {action} {scope} score={score}"
 
 
-# ---- Setups: active setup IS the live windows -----------------------------
+# ---- HWND-keyed merge for dynamic auto-detect -----------------------------
 #
-# The active setup's windows ARE what bridge.windows reflects. Every save
-# mirrors bridge.windows back into the active setup so edits aren't lost
-# when switching. Activating a setup copies its windows in (after first
-# mirroring the outgoing setup's windows out). Creating / deleting setups
-# keeps the invariant "always at least one setup, exactly one active".
+# Auto-detect runs on bridge start, manual button, and workspace change. The
+# merge below preserves user-edited fields (renamed names, chat_target
+# overrides) for windows whose HWND is still alive, while pulling in fresh
+# regions from GetWindowRect and dropping HWNDs that disappeared.
 
 
-def sync_active_setup(cfg: dict) -> None:
-    """Mirror the live ``bridge.windows`` into the active setup's
-    snapshot. Called from save_config and from setup-mutating helpers
-    before they switch active, so the outgoing setup is always
-    up-to-date with the latest edits."""
-    bridge = cfg.get("bridge")
-    if not isinstance(bridge, dict):
-        return
-    _ensure_active_setup(bridge)
-    active_id = bridge.get("active_setup_id")
-    if not active_id:
-        return
-    for s in bridge.get("setups", []) or []:
-        if s.get("id") == active_id:
-            s["windows"] = [dict(w) for w in (bridge.get("windows") or [])]
-            return
+def merge_detected_windows(
+    existing: list[dict],
+    detected: list[dict],
+) -> list[dict]:
+    """Reconcile the current ``bridge.windows`` list with a fresh
+    enumeration. ``detected`` is the output of
+    ``press_windows.list_cursor_windows()`` — each entry has hwnd,
+    region (physical pixels), and a short label.
 
+    For each detected HWND:
+      * If we already had a window with this hwnd, preserve it but
+        update region. Keep the user's name + chat_target.
+      * If new, create a fresh window dict from the detected info.
+    Existing windows whose hwnd is no longer in ``detected`` are
+    dropped — they're not on the foreground workspace anymore (or
+    their Cursor instance closed).
 
-def new_setup(cfg: dict, name: str) -> str:
-    """Create a fresh empty setup and activate it. Mirrors the outgoing
-    setup's windows first so its state is preserved, then clears
-    ``bridge.windows`` (the new setup starts empty). Returns the new
-    setup's id."""
-    bridge = cfg.setdefault("bridge", default_bridge_config())
-    bridge.setdefault("setups", [])
-    sync_active_setup(cfg)
-    setup = default_setup(name or "Setup")
-    bridge["setups"].append(setup)
-    bridge["active_setup_id"] = setup["id"]
-    bridge["windows"] = []
-    return setup["id"]
-
-
-def activate_setup(cfg: dict, setup_id: str) -> bool:
-    """Switch the active setup. Mirrors the outgoing setup's windows
-    first (so edits to it aren't lost), then loads the incoming
-    setup's windows into ``bridge.windows``. Returns True if the id
-    was found, False otherwise (live state unchanged)."""
-    bridge = cfg.get("bridge")
-    if not isinstance(bridge, dict):
-        return False
-    target = next(
-        (s for s in bridge.get("setups", []) or [] if s.get("id") == setup_id),
-        None,
-    )
-    if target is None:
-        return False
-    if bridge.get("active_setup_id") == setup_id:
-        # Already active — still copy the snapshot into live windows
-        # in case they drifted (e.g. after a corrupt save).
-        bridge["windows"] = [dict(w) for w in target.get("windows", [])]
-        return True
-    sync_active_setup(cfg)
-    bridge["active_setup_id"] = setup_id
-    bridge["windows"] = [dict(w) for w in target.get("windows", [])]
-    return True
-
-
-def delete_setup(cfg: dict, setup_id: str) -> bool:
-    """Remove a setup. If it was the active one, activate the first
-    remaining (or create a fresh empty Default if none remain) and
-    swap its windows into ``bridge.windows``. Returns True if removed,
-    False if the id was unknown."""
-    bridge = cfg.get("bridge")
-    if not isinstance(bridge, dict):
-        return False
-    setups = bridge.get("setups", []) or []
-    idx = next(
-        (i for i, s in enumerate(setups) if s.get("id") == setup_id),
-        None,
-    )
-    if idx is None:
-        return False
-    was_active = bridge.get("active_setup_id") == setup_id
-    setups.pop(idx)
-    if not was_active:
-        return True
-    if setups:
-        first = setups[0]
-        bridge["active_setup_id"] = first.get("id")
-        bridge["windows"] = [dict(w) for w in first.get("windows", [])]
-    else:
-        setup = default_setup("Default")
-        setups.append(setup)
-        bridge["active_setup_id"] = setup["id"]
-        bridge["windows"] = []
-    return True
+    Returns a new list; doesn't mutate the inputs. Order follows the
+    ``detected`` list so the table reflects the OS's z-order /
+    enumeration order, not whatever stale order the config carried.
+    """
+    by_hwnd: dict[int, dict] = {}
+    for w in existing or []:
+        h = w.get("hwnd")
+        try:
+            h_int = int(h) if h is not None else None
+        except (TypeError, ValueError):
+            h_int = None
+        if h_int is not None:
+            by_hwnd[h_int] = w
+    out: list[dict] = []
+    for d in detected or []:
+        try:
+            h_int = int(d.get("hwnd"))
+        except (TypeError, ValueError):
+            continue
+        region = d.get("region")
+        if not _valid_region(list(region) if region else None):
+            continue
+        prior = by_hwnd.get(h_int)
+        if prior is not None:
+            # Preserve user-edited fields, refresh region from the
+            # current enumeration.
+            updated = dict(prior)
+            updated["hwnd"] = h_int
+            updated["region"] = [int(v) for v in region]
+            out.append(updated)
+        else:
+            entry = default_bridge_window(d.get("name", "Cursor"))
+            entry["hwnd"] = h_int
+            entry["region"] = [int(v) for v in region]
+            out.append(entry)
+    return out

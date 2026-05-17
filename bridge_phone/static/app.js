@@ -859,128 +859,10 @@ async function toggleNotifications() {
   }
 }
 
-// ---- Setups (named window layouts) -------------------------------------
-//
-// The active setup's windows ARE the live bridge.windows — every persist
-// on the desktop mirrors them back, so switching is non-destructive. The
-// phone UI is just three controls: the selector (changes = activate),
-// "New…" (creates a fresh empty setup), and ✕ (deletes the current one,
-// auto-falling-back to the first remaining or a new Default).
-
-let _currentActiveId = null;
-
-async function refreshSetups() {
-  const select = $("setup-select");
-  if (!select) return;
-  try {
-    const res = await fetch("/api/bridge/setups");
-    if (!res.ok) return;
-    const data = await res.json();
-    select.innerHTML = "";
-    const setups = data.setups || [];
-    _currentActiveId = data.active_id || null;
-    if (setups.length === 0) {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "(no setups)";
-      opt.disabled = true;
-      select.appendChild(opt);
-      return;
-    }
-    for (const s of setups) {
-      const opt = document.createElement("option");
-      opt.value = s.id;
-      opt.textContent = `${s.name} · ${s.window_count} win`;
-      if (s.id === _currentActiveId) opt.selected = true;
-      select.appendChild(opt);
-    }
-  } catch {}
-}
-
-async function activateSetup() {
-  const select = $("setup-select");
-  if (!select || !select.value) return;
-  const targetId = select.value;
-  if (targetId === _currentActiveId) return;
-  try {
-    const res = await fetch(
-      `/api/bridge/setups/${encodeURIComponent(targetId)}/activate`,
-      { method: "POST" }
-    );
-    if (!res.ok) {
-      const detail = await res.text();
-      alert(`Switch failed: ${res.status} ${detail}`);
-      // Roll the select back so the UI matches reality.
-      await refreshSetups();
-      return;
-    }
-    _currentActiveId = targetId;
-  } catch (e) {
-    alert(`Switch network error: ${e.message}`);
-    await refreshSetups();
-  }
-}
-
-async function newSetup() {
-  const name = (prompt("Name for the new setup:") || "").trim();
-  if (!name) return;
-  const btn = $("setup-new-btn");
-  btn.disabled = true;
-  const original = btn.textContent;
-  btn.textContent = "Creating…";
-  try {
-    const res = await fetch("/api/bridge/setups", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    if (!res.ok) {
-      const detail = await res.text();
-      alert(`Create failed: ${res.status} ${detail}`);
-    } else {
-      await refreshSetups();
-    }
-  } catch (e) {
-    alert(`Create network error: ${e.message}`);
-  }
-  setTimeout(() => {
-    btn.disabled = false;
-    btn.textContent = original;
-  }, 600);
-}
-
-async function deleteSetup() {
-  if (!_currentActiveId) return;
-  const select = $("setup-select");
-  const label = select && select.selectedOptions[0]
-    ? select.selectedOptions[0].textContent.split(" · ")[0]
-    : "this setup";
-  if (!confirm(`Delete the setup '${label}' and its windows?`)) return;
-  try {
-    const res = await fetch(
-      `/api/bridge/setups/${encodeURIComponent(_currentActiveId)}`,
-      { method: "DELETE" }
-    );
-    if (!res.ok) {
-      const detail = await res.text();
-      alert(`Delete failed: ${res.status} ${detail}`);
-      return;
-    }
-    await refreshSetups();
-  } catch (e) {
-    alert(`Delete network error: ${e.message}`);
-  }
-}
-
 async function autoDetectWindows() {
-  // Two confirms to make the destructive path opt-in: the first runs
-  // an "add" pass (safe — appends to existing) on yes. We don't expose
-  // "replace" from the phone yet; if the user wants the wipe-and-rebuild
-  // they should do it from the desktop where they can see the dialog.
-  const ok = confirm(
-    "Scan the desktop for Cursor windows and add them to your setup?"
-  );
-  if (!ok) return;
+  // Refresh the tracked windows against whatever Cursor windows are
+  // visible on the current workspace. The desktop runs an HWND-keyed
+  // merge so renames + chat_target overrides survive.
   const btn = $("auto-detect-btn");
   btn.disabled = true;
   btn.textContent = "Scanning…";
@@ -988,14 +870,12 @@ async function autoDetectWindows() {
     const res = await fetch("/api/admin/auto_detect", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "add" }),
+      body: JSON.stringify({ mode: "replace" }),
     });
     if (res.ok) {
       const data = await res.json();
       const n = data.window_count || 0;
-      // No alert spam — the windows list refreshes via SSE and the
-      // user can see the new entries appear within a second.
-      btn.textContent = `Added (${n})`;
+      btn.textContent = `Detected (${n})`;
       setTimeout(() => {
         btn.disabled = false;
         btn.textContent = "Detect";
@@ -1212,12 +1092,10 @@ async function switchWorkspace(direction, btn) {
     }
     const data = await res.json();
     updateWorkspaceLabel(data.workspace_id);
-    // If the desktop auto-activated a different setup, refresh our
-    // local setup state so the drawer's dropdown reflects it next
-    // time the user opens it. SSE will push the new windows.
-    if (data.active_setup_id) {
-      await refreshSetups();
-    }
+    // The desktop re-runs auto-detect synchronously on workspace
+    // change, so the next /api/state fetch (which SSE will trigger
+    // via window_state events) shows the new workspace's windows
+    // automatically.
   } catch (e) {
     alert(`Workspace switch network error: ${e.message}`);
   } finally {
@@ -1230,25 +1108,6 @@ async function switchWorkspace(direction, btn) {
         btn.classList.remove("loading");
       }, 500);
     }
-  }
-}
-
-async function bindWorkspace(btn) {
-  if (btn) btn.disabled = true;
-  try {
-    const res = await fetch("/api/bridge/workspace/bind", { method: "POST" });
-    if (!res.ok) {
-      const detail = await res.text();
-      alert(`Bind failed: ${res.status} ${detail}`);
-      return;
-    }
-    const data = await res.json();
-    updateWorkspaceLabel(data.workspace_id);
-    await refreshSetups();
-  } catch (e) {
-    alert(`Bind network error: ${e.message}`);
-  } finally {
-    if (btn) setTimeout(() => { btn.disabled = false; }, 400);
   }
 }
 
@@ -1325,19 +1184,8 @@ $("notif-test").addEventListener("click", async (e) => {
 $("autoreload-toggle").addEventListener("click", toggleAutoReload);
 $("reload-btn").addEventListener("click", reloadBridge);
 $("auto-detect-btn").addEventListener("click", autoDetectWindows);
-$("setup-select").addEventListener("change", activateSetup);
-$("setup-new-btn").addEventListener("click", newSetup);
-$("setup-delete-btn").addEventListener("click", deleteSetup);
 $("ws-prev").addEventListener("click", (e) => switchWorkspace("prev", e.currentTarget));
 $("ws-next").addEventListener("click", (e) => switchWorkspace("next", e.currentTarget));
-$("ws-bind").addEventListener("click", (e) => bindWorkspace(e.currentTarget));
-// Refresh setup list when the settings drawer opens — keeps it
-// in sync after the desktop / another client created or deleted
-// a setup.
-$("settings-btn").addEventListener("click", () => {
-  if (!$("settings-panel").hidden) refreshSetups();
-});
-refreshSetups();
 $("rules-toggle").addEventListener("click", toggleRules);
 for (const btn of document.querySelectorAll(".scroll-btn[data-amount]")) {
   const amount = Number(btn.dataset.amount || "1");

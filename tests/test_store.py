@@ -277,6 +277,96 @@ def test_seed_defaults_skips_already_populated_slots(tmp_path, monkeypatch):
     assert cfg["bridge"]["idle_template_path"] == "user_idle.png"
 
 
+def test_merge_detected_windows_preserves_name_and_chat_target_for_known_hwnd():
+    """Re-detecting refreshes region from EnumWindows but keeps the
+    user's rename + chat_target override for windows whose HWND is
+    still alive."""
+    existing = [
+        {
+            "id": "w1",
+            "hwnd": 1234,
+            "name": "Project A",  # user-renamed
+            "region": [0, 0, 800, 600],
+            "chat_target": [400, 580],  # user-set
+            "read_region": None,
+        }
+    ]
+    detected = [
+        {"hwnd": 1234, "name": "code.py - Cursor", "region": [100, 100, 900, 700]},
+    ]
+    [out] = press_store.merge_detected_windows(existing, detected)
+    assert out["hwnd"] == 1234
+    assert out["name"] == "Project A"            # rename preserved
+    assert out["chat_target"] == [400, 580]     # override preserved
+    assert out["region"] == [100, 100, 900, 700]  # fresh region
+
+
+def test_merge_detected_windows_adds_new_hwnd_and_drops_disappeared():
+    """A new HWND in the enumeration produces a fresh entry; an
+    existing entry whose HWND vanished from the enumeration is
+    dropped (Cursor closed, or window moved off this workspace)."""
+    existing = [
+        {"id": "stale", "hwnd": 1, "name": "Old", "region": [0, 0, 100, 100]},
+    ]
+    detected = [
+        {"hwnd": 2, "name": "New", "region": [0, 0, 200, 200]},
+    ]
+    [out] = press_store.merge_detected_windows(existing, detected)
+    assert out["hwnd"] == 2
+    assert out["name"] == "New"
+
+
+def test_merge_detected_windows_skips_invalid_entries():
+    """Detected entries missing an hwnd or with an invalid region
+    are silently skipped — the merge is best-effort, a single bad
+    enumeration entry shouldn't poison the whole list."""
+    detected = [
+        {"hwnd": "not-an-int", "name": "Bad", "region": [0, 0, 100, 100]},
+        {"hwnd": 7, "name": "Good", "region": [0, 0, 100, 100]},
+        {"hwnd": 8, "name": "BadRegion", "region": [0, 0, -5, -5]},
+    ]
+    out = press_store.merge_detected_windows([], detected)
+    assert len(out) == 1
+    assert out[0]["hwnd"] == 7
+
+
+def test_normalize_window_round_trips_hwnd():
+    cfg = press_store.normalize_config(
+        {"bridge": {"windows": [{"name": "X", "hwnd": 4242, "region": [0, 0, 100, 100]}]}}
+    )
+    assert cfg["bridge"]["windows"][0]["hwnd"] == 4242
+
+
+def test_legacy_config_with_setups_drops_to_active_setup_windows():
+    """A pre-simplification config carrying setups + active_setup_id
+    loads cleanly: setups + active_setup_id are silently dropped,
+    and the active setup's windows surface as bridge.windows so the
+    user's tracked windows aren't lost on upgrade."""
+    cfg = press_store.normalize_config(
+        {
+            "bridge": {
+                "windows": [],
+                "setups": [
+                    {"id": "a", "name": "A", "windows": []},
+                    {
+                        "id": "b",
+                        "name": "B",
+                        "windows": [
+                            {"name": "Saved", "region": [10, 20, 300, 200]}
+                        ],
+                    },
+                ],
+                "active_setup_id": "b",
+            }
+        }
+    )
+    assert "setups" not in cfg["bridge"]
+    assert "active_setup_id" not in cfg["bridge"]
+    [w] = cfg["bridge"]["windows"]
+    assert w["name"] == "Saved"
+    assert w["region"] == [10, 20, 300, 200]
+
+
 def test_write_template_with_dpi_variants_creates_all_files(tmp_path):
     """Capturing at 1.5x should produce the base PNG + one scaled
     variant per supported preset (100/125/150/175/200)."""

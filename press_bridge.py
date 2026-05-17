@@ -86,26 +86,12 @@ class BridgeCallbacks:
     # bridge.windows in config. Returns the number of windows now in
     # the bridge config (or -1 on platform unsupported / no callback).
     auto_detect_windows: Optional[Callable[[str], int]] = None
-    # Setup-management callbacks. Each mutates / reads bridge.setups
-    # and bridge.windows under the desktop's cfg lock, then persists.
-    # `new_bridge_setup`: create a fresh empty setup and activate it
-    # (returns the new id). `activate_bridge_setup`: switch the active
-    # setup; the previous active's windows are auto-mirrored so edits
-    # aren't lost. `delete_bridge_setup`: remove a setup; if it was
-    # active, the first remaining is activated (or a Default is created
-    # if none remain).
-    new_bridge_setup: Optional[Callable[[str], str]] = None
-    activate_bridge_setup: Optional[Callable[[str], bool]] = None
-    delete_bridge_setup: Optional[Callable[[str], bool]] = None
-    # Windows virtual-desktop (workspace) callbacks.
-    # `workspace_switch(direction)`: fires Ctrl+Win+Right/Left, waits
-    #   for settle, then activates the setup bound to the new
-    #   workspace (if any). Returns a dict with the new workspace_id
-    #   and the activated setup_id.
-    # `workspace_bind_active`: stamps the current workspace's GUID
-    #   onto the active setup's ``workspace_id`` field.
+    # Windows virtual-desktop (workspace) switch keystroke. Returns
+    # a dict ``{workspace_id}`` after firing Ctrl+Win+Right/Left and
+    # waiting for the desktop transition to settle. The host side
+    # also re-runs auto-detect on workspace change automatically; the
+    # endpoint just exposes the keystroke so the phone can drive it.
     workspace_switch: Optional[Callable[[str], dict]] = None
-    workspace_bind_active: Optional[Callable[[], Optional[str]]] = None
     # Web Push hooks. Each runs on the host side (desktop process)
     # under the cfg lock so subscription mutations and VAPID key
     # generation persist via the same save_config path everything
@@ -932,84 +918,6 @@ def build_app(service: BridgeService):
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return JSONResponse({"reload_scheduled": True})
 
-    @app.get("/api/bridge/setups")
-    async def list_setups() -> JSONResponse:
-        """Return all setups (id + name + window count) plus the
-        currently active setup id. Live windows are in /api/state."""
-        cfg = service.callbacks.cfg_snapshot()
-        bridge = cfg.get("bridge", {}) or {}
-        setups = bridge.get("setups", []) or []
-        return JSONResponse(
-            {
-                "active_id": bridge.get("active_setup_id"),
-                "setups": [
-                    {
-                        "id": s.get("id"),
-                        "name": s.get("name"),
-                        "window_count": len(s.get("windows", []) or []),
-                    }
-                    for s in setups
-                ],
-            }
-        )
-
-    @app.post("/api/bridge/setups")
-    async def new_setup_endpoint(payload: dict) -> JSONResponse:
-        """Create a fresh empty setup and activate it. The outgoing
-        setup's windows are auto-mirrored, then ``bridge.windows`` is
-        cleared. Body: ``{"name": "..."}``."""
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="name required")
-        name = (payload.get("name") or "").strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="name required")
-        if service.callbacks.new_bridge_setup is None:
-            raise HTTPException(status_code=501, detail="new setup not wired")
-        try:
-            sid = service.callbacks.new_bridge_setup(name)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        for s in service.windows.summaries():
-            service.hub.publish_typed("window_state", s)
-        return JSONResponse({"id": sid, "name": name, "active_id": sid})
-
-    @app.post("/api/bridge/setups/{setup_id}/activate")
-    async def activate_setup_endpoint(setup_id: str) -> JSONResponse:
-        """Switch the active setup. The previous active's windows are
-        auto-mirrored before the swap, so edits aren't lost. 404 if
-        the id is unknown. Fans an SSE event so connected phones
-        re-read the window list within ~1 s."""
-        if service.callbacks.activate_bridge_setup is None:
-            raise HTTPException(status_code=501, detail="activate not wired")
-        try:
-            activated = service.callbacks.activate_bridge_setup(setup_id)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        if not activated:
-            raise HTTPException(status_code=404, detail="setup not found")
-        for s in service.windows.summaries():
-            service.hub.publish_typed("window_state", s)
-        return JSONResponse({"active_id": setup_id})
-
-    @app.delete("/api/bridge/setups/{setup_id}")
-    async def delete_setup_endpoint(setup_id: str) -> JSONResponse:
-        """Remove a setup. If it was active, the first remaining is
-        activated (or a fresh Default is created if none remain).
-        404 if the id is unknown."""
-        if service.callbacks.delete_bridge_setup is None:
-            raise HTTPException(status_code=501, detail="delete not wired")
-        try:
-            removed = service.callbacks.delete_bridge_setup(setup_id)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        if not removed:
-            raise HTTPException(status_code=404, detail="setup not found")
-        # Live windows may have changed (if we deleted the active setup),
-        # so fan an SSE event for the phone to re-read.
-        for s in service.windows.summaries():
-            service.hub.publish_typed("window_state", s)
-        return JSONResponse({"deleted": True, "setup_id": setup_id})
-
     @app.get("/api/notifications/vapid-key")
     async def push_vapid_key() -> JSONResponse:
         """Public VAPID key the phone passes to PushManager.subscribe.
@@ -1110,25 +1018,6 @@ def build_app(service: BridgeService):
         for s in service.windows.summaries():
             service.hub.publish_typed("window_state", s)
         return JSONResponse(result or {})
-
-    @app.post("/api/bridge/workspace/bind")
-    async def workspace_bind_endpoint() -> JSONResponse:
-        """Bind the active setup to the current Windows virtual
-        desktop. After binding, future switches to this workspace
-        auto-activate the setup. Returns ``{"workspace_id": str}``
-        or 400 if the workspace GUID can't be read."""
-        if service.callbacks.workspace_bind_active is None:
-            raise HTTPException(status_code=501, detail="workspace bind not wired")
-        try:
-            wid = service.callbacks.workspace_bind_active()
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        if not wid:
-            raise HTTPException(
-                status_code=400,
-                detail="couldn't read current workspace (non-Windows or COM failed)",
-            )
-        return JSONResponse({"workspace_id": wid})
 
     @app.post("/api/admin/auto_detect")
     async def admin_auto_detect(payload: dict) -> JSONResponse:

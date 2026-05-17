@@ -925,10 +925,6 @@ class MainWindow(QMainWindow):
     # The slot redraws the windows table and resets worker tracking on
     # the Qt main thread.
     bridge_windows_auto_detected = Signal(int)
-    # Fires after a phone-triggered setup new/activate/delete mutates
-    # bridge.setups / bridge.windows / active_setup_id. Slot refreshes
-    # the combo + the windows table on the main thread.
-    bridge_setups_changed_remote = Signal(str)  # action: "new"/"activate"/"delete"
 
     CHROME_HEIGHT = 120
 
@@ -950,9 +946,6 @@ class MainWindow(QMainWindow):
         self.bridge_set_rules_requested.connect(self._set_rules_running_remote, Qt.QueuedConnection)
         self.bridge_windows_auto_detected.connect(
             self._on_bridge_windows_auto_detected, Qt.QueuedConnection,
-        )
-        self.bridge_setups_changed_remote.connect(
-            self._on_bridge_setups_changed_remote, Qt.QueuedConnection,
         )
         self.bridge_window_renamed_remote.connect(
             self._on_bridge_window_renamed_remote, Qt.QueuedConnection
@@ -1052,7 +1045,6 @@ class MainWindow(QMainWindow):
         self._refresh_rule_list(0 if self._cfg.get("rules") else None)
         self._refresh_bridge_template_view()
         self._refresh_bridge_windows_table()
-        self._refresh_bridge_setup_combo()
         self._set_running_status(False)
         self._log(f"[ready] loaded {CONFIG_PATH}")
         # Restore window geometry + splitter sizes + collapse states from
@@ -1702,55 +1694,16 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        # Setup row — sits above the windows table. The combo lists
-        # all setups; switching the combo activates that setup (its
-        # windows replace the live ones). "New" creates a fresh empty
-        # setup and activates it; the trash icon deletes the current
-        # one. The active setup's windows ARE the live ``bridge.windows``:
-        # every persist mirrors them back, so switching never loses
-        # edits.
-        setup_row = QHBoxLayout()
-        setup_row.setSpacing(6)
-        setup_row.addWidget(BodyLabel("Setup:"))
-        self._bridge_setup_combo = ComboBox()
-        self._bridge_setup_combo.setMinimumWidth(180)
-        self._bridge_setup_combo.currentIndexChanged.connect(
-            self._on_bridge_setup_combo_changed
-        )
-        setup_row.addWidget(self._bridge_setup_combo, 1)
-        setup_new_btn = PushButton(FIF.ADD, "New setup")
-        setup_new_btn.setToolTip(
-            "Create a fresh empty setup and switch to it. The current "
-            "setup is preserved — switch back via the dropdown."
-        )
-        setup_new_btn.clicked.connect(self._new_bridge_setup)
-        setup_row.addWidget(setup_new_btn)
-        setup_bind_btn = ToolButton(FIF.PIN)
-        setup_bind_btn.setToolTip(
-            "Bind the active setup to the current Windows virtual "
-            "desktop. Switching to that workspace later (via "
-            "Ctrl+Win+Right / Left, or the phone's ◀ ▶ buttons) "
-            "auto-activates this setup."
-        )
-        setup_bind_btn.clicked.connect(self._bind_active_setup_to_workspace)
-        setup_row.addWidget(setup_bind_btn)
-        setup_del_btn = ToolButton(FIF.DELETE)
-        setup_del_btn.setToolTip("Delete the current setup")
-        setup_del_btn.clicked.connect(self._delete_bridge_setup)
-        setup_row.addWidget(setup_del_btn)
-        win_body.addLayout(setup_row)
-
         win_body.addWidget(self._bridge_windows_table)
 
         add_row = QHBoxLayout()
-        add_btn = PushButton(FIF.ADD, "Add window")
-        add_btn.clicked.connect(self._add_bridge_window)
-        add_row.addWidget(add_btn)
         auto_btn = PushButton(FIF.SEARCH, "Auto-detect")
         auto_btn.setToolTip(
-            "Scan visible Cursor windows on this desktop via Win32 and "
-            "preview the result before adding them to the current setup. "
-            "To keep the existing setup intact, click 'New setup' first."
+            "Replace the tracked windows with every visible Cursor "
+            "window on the current virtual desktop. Renames + chat-"
+            "target overrides are preserved for windows whose Win32 "
+            "HWND is still alive. Also runs automatically on bridge "
+            "start and when you switch virtual desktops."
         )
         auto_btn.clicked.connect(self._auto_detect_bridge_windows)
         add_row.addWidget(auto_btn)
@@ -2038,394 +1991,76 @@ class MainWindow(QMainWindow):
             self._cfg["bridge"]["idle_threshold"] = float(value)
         self._persist()
 
-    def _add_bridge_window(self) -> None:
-        existing = self._cfg.get("bridge", {}).get("windows", [])
-        name = f"Cursor #{len(existing) + 1}"
-        self._bridge_log(f"add window: drag a box around the new {name}…")
-        bbox = capture_drag_bbox(self)
-        if not bbox:
-            self._bridge_log("add window cancelled")
-            return
-        win = default_bridge_window(name)
-        win["region"] = [int(b) for b in bbox]
-        with self._cfg_lock:
-            self._cfg["bridge"]["windows"].append(win)
-        self._persist()
-        self._refresh_bridge_windows_table()
-        self._bridge_log(
-            f"added '{name}' at ({bbox[0]},{bbox[1]}) {bbox[2]}×{bbox[3]}"
-        )
-
-    def _refresh_bridge_setup_combo(self) -> None:
-        """Populate the setup combo from the current config and select
-        the active setup. Called on every mutation that touches
-        bridge.setups / active_setup_id and on initial UI build."""
-        combo = getattr(self, "_bridge_setup_combo", None)
-        if combo is None:
-            return
-        # Block signals while we reset items / select index so the
-        # currentIndexChanged handler (which activates a setup) doesn't
-        # fire spuriously during a programmatic refresh.
-        combo.blockSignals(True)
-        combo.clear()
-        bridge = self._cfg.get("bridge", {}) or {}
-        setups = bridge.get("setups", []) or []
-        active_id = bridge.get("active_setup_id")
-        active_idx = 0
-        # qfluentwidgets ComboBox.addItem signature is (text, icon=None,
-        # userData=None). Passing the id positionally lands in `icon`,
-        # not userData, so itemData() returns None and the change
-        # handler bails out — keep the keyword explicit.
-        for i, s in enumerate(setups):
-            pin = " 📌" if s.get("workspace_id") else ""
-            label = (
-                f"{s.get('name', 'Setup')}{pin}  ·  "
-                f"{len(s.get('windows', []))} win"
-            )
-            combo.addItem(label, userData=s.get("id"))
-            if s.get("id") == active_id:
-                active_idx = i
-        if combo.count() > 0:
-            combo.setCurrentIndex(active_idx)
-        combo.blockSignals(False)
-
-    def _on_bridge_setup_combo_changed(self, index: int) -> None:
-        """Combo selection changed by the user → activate that setup.
-        No confirm dialog; the outgoing setup's windows are auto-
-        mirrored so switching is non-destructive."""
-        combo = self._bridge_setup_combo
-        if index < 0 or combo.count() == 0:
-            return
-        sid = combo.itemData(index)
-        if not isinstance(sid, str):
-            return
-        bridge = self._cfg.get("bridge", {}) or {}
-        if bridge.get("active_setup_id") == sid:
-            return
-        from press_store import activate_setup
-
-        with self._cfg_lock:
-            ok = activate_setup(self._cfg, sid)
-        if not ok:
-            return
-        self._persist()
-        self._refresh_bridge_windows_table()
-        self._refresh_bridge_setup_combo()
-        self._worker.reset_window_tracking()
-        name = combo.itemText(index).split("·")[0].strip()
-        self._bridge_log(f"switched to setup '{name}'")
-
-    def _new_bridge_setup(self) -> None:
-        """Create a fresh empty setup and switch to it. The previous
-        setup is preserved automatically (its windows were already
-        mirrored on the last persist)."""
-        from PySide6.QtWidgets import QInputDialog
-
-        existing = (self._cfg.get("bridge", {}) or {}).get("setups", []) or []
-        suggested = f"Setup {len(existing) + 1}"
-        name, ok = QInputDialog.getText(
-            self,
-            "New setup",
-            "Name this setup — you'll see it in the dropdown:",
-            text=suggested,
-        )
-        if not ok:
-            return
-        clean = (name or "").strip()
-        if not clean:
-            return
-        from press_store import new_setup
-
-        with self._cfg_lock:
-            new_setup(self._cfg, clean)
-        self._persist()
-        self._refresh_bridge_setup_combo()
-        self._refresh_bridge_windows_table()
-        self._worker.reset_window_tracking()
-        self._bridge_log(f"created setup '{clean}' (empty)")
-
-    def _delete_bridge_setup(self) -> None:
-        """Remove the currently active setup. If others exist, the
-        first remaining becomes active; otherwise a fresh empty
-        Default is created. Confirms first."""
-        bridge = self._cfg.get("bridge", {}) or {}
-        sid = bridge.get("active_setup_id")
-        if not sid:
-            return
-        setups = bridge.get("setups", []) or []
-        current = next((s for s in setups if s.get("id") == sid), None)
-        name = current.get("name", "Setup") if current else "Setup"
-        from PySide6.QtWidgets import QMessageBox
-
-        confirmed = QMessageBox.question(
-            self,
-            "Delete setup",
-            f"Delete the setup '{name}' and its windows?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if confirmed != QMessageBox.Yes:
-            return
-        from press_store import delete_setup
-
-        with self._cfg_lock:
-            removed = delete_setup(self._cfg, sid)
-        if not removed:
-            return
-        self._persist()
-        self._refresh_bridge_setup_combo()
-        self._refresh_bridge_windows_table()
-        self._worker.reset_window_tracking()
-        self._bridge_log(f"deleted setup '{name}'")
-
-    def _bind_active_setup_to_workspace(self) -> None:
-        """Stamp the current Windows virtual-desktop GUID onto the
-        active setup's ``workspace_id``. After binding, any future
-        switch to this workspace auto-activates the setup."""
-        import press_workspace as wsmod
-
-        wid = wsmod.current_id()
-        if not wid:
-            self._bridge_log(
-                "bind workspace: couldn't read current workspace GUID "
-                "(non-Windows, or COM call failed)"
-            )
-            return
-        bridge = self._cfg.get("bridge", {}) or {}
-        active_id = bridge.get("active_setup_id")
-        if not active_id:
-            return
-        with self._cfg_lock:
-            for s in self._cfg["bridge"].get("setups", []) or []:
-                if s.get("id") == active_id:
-                    s["workspace_id"] = wid
-                    name = s.get("name", "Setup")
-                    break
-            else:
-                return
-        self._persist()
-        # Remember so the poll loop doesn't immediately re-activate
-        # (this *is* the workspace the setup just got bound to).
-        self._last_seen_workspace_id = wid
-        self._refresh_bridge_setup_combo()
-        self._bridge_log(f"bound '{name}' to current workspace")
-
     def _poll_workspace(self) -> None:
-        """Detect virtual-desktop switches and auto-activate the
-        setup bound to the new workspace. Fires every 1.5 s; cheap
-        no-op when nothing changed or no setup is bound."""
+        """Detect virtual-desktop switches and re-run auto-detect for
+        the new workspace. Fires every 1.5 s; cheap no-op when nothing
+        changed (the COM call is <5 ms and EnumWindows itself only
+        runs after a real workspace flip)."""
         import press_workspace as wsmod
 
         wid = wsmod.current_id()
         if not wid or wid == self._last_seen_workspace_id:
             return
+        prev = self._last_seen_workspace_id
         self._last_seen_workspace_id = wid
-        bridge = self._cfg.get("bridge", {}) or {}
-        if bridge.get("active_setup_id") is None:
+        if prev is None:
+            # First poll after launch — don't fire a redundant detect
+            # since the bridge-start hook already runs one.
             return
-        match = next(
-            (
-                s
-                for s in (bridge.get("setups") or [])
-                if s.get("workspace_id") == wid
-            ),
-            None,
-        )
-        if match is None:
-            return
-        if match.get("id") == bridge.get("active_setup_id"):
-            return
-        from press_store import activate_setup
+        count = self._auto_detect_replace_now(reason="workspace change")
+        if count >= 0:
+            self._bridge_log(
+                f"workspace changed → re-detected {count} Cursor window"
+                f"{'s' if count != 1 else ''}"
+            )
 
-        with self._cfg_lock:
-            ok = activate_setup(self._cfg, match["id"])
-        if not ok:
-            return
-        self._persist()
-        self._refresh_bridge_setup_combo()
-        self._refresh_bridge_windows_table()
-        self._worker.reset_window_tracking()
-        self._bridge_log(
-            f"workspace changed → activated setup '{match.get('name', 'Setup')}'"
-        )
-
-    def _auto_detect_bridge_windows(self) -> None:
-        """Run Win32 EnumWindows to find visible Cursor windows, show a
-        small picker dialog, and either replace the current windows
-        list or append to it based on the user's choice. The dialog
-        is the safety net — never overwrites without a confirm-style
-        button click."""
+    def _auto_detect_replace_now(self, reason: str = "manual") -> int:
+        """Core auto-detect: enumerate Cursor windows, merge into the
+        tracked list via HWND, persist, refresh UI, reset worker
+        tracking. Returns the new window count, or -1 if the detector
+        threw (e.g. non-Windows). Caller logs the user-facing line so
+        the message can include trigger-specific context."""
+        from press_store import merge_detected_windows
         from press_windows import list_cursor_windows
 
         try:
             detected = list_cursor_windows()
         except Exception as exc:
-            self._bridge_log(f"auto-detect failed: {exc}")
+            self._bridge_log(f"auto-detect failed ({reason}): {exc}")
+            return -1
+        with self._cfg_lock:
+            existing = self._cfg.get("bridge", {}).get("windows", []) or []
+            merged = merge_detected_windows(existing, detected)
+            self._cfg["bridge"]["windows"] = merged
+            count = len(merged)
+        self._persist()
+        self._refresh_bridge_windows_table()
+        self._worker.reset_window_tracking()
+        return count
+
+    def _auto_detect_bridge_windows(self) -> None:
+        """Manual Auto-detect button — runs the HWND-keyed merge and
+        reports the new window count. Existing renames + chat_target
+        overrides survive (the merge keys by HWND, not by region)."""
+        count = self._auto_detect_replace_now(reason="manual")
+        if count < 0:
             return
-        if not detected:
+        if count == 0:
             self._bridge_log(
                 "auto-detect: no visible Cursor windows found "
                 "(minimised / hidden / no 'Cursor' in title)"
             )
             return
-
-        mode = self._auto_detect_dialog(detected)
-        if mode is None:
-            self._bridge_log("auto-detect: cancelled")
-            return
-
-        picked = mode["picked"]
-        if not picked:
-            self._bridge_log("auto-detect: nothing checked, nothing changed")
-            return
-        self._apply_auto_detected(picked, replace=mode["replace"])
-
-    def _auto_detect_dialog(self, detected: list[dict]) -> Optional[dict]:
-        """Modal dialog listing detected windows with checkboxes and
-        Add / Replace / Cancel buttons. Returns
-        ``{picked: list[dict], replace: bool}`` on accept, None on
-        cancel."""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Auto-detect Cursor windows")
-        dlg.setMinimumWidth(420)
-        layout = QVBoxLayout(dlg)
-
-        intro = BodyLabel(
-            f"Found {len(detected)} visible Cursor window"
-            f"{'s' if len(detected) != 1 else ''} on this desktop."
+        self._bridge_log(
+            f"auto-detect: tracking {count} Cursor window"
+            f"{'s' if count != 1 else ''}"
         )
-        layout.addWidget(intro)
-
-        listw = QListWidget()
-        listw.setSelectionMode(QListWidget.NoSelection)
-        for d in detected:
-            item = QListWidgetItem(
-                f"{d['name']}   —   "
-                f"{d['region'][2]}×{d['region'][3]} px at "
-                f"({d['region'][0]}, {d['region'][1]})"
-            )
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked)
-            item.setData(Qt.UserRole, d)
-            listw.addItem(item)
-        layout.addWidget(listw)
-
-        hint = CaptionLabel(
-            "Add appends checked windows to the current setup.\n"
-            "Replace wipes the current setup's windows first, then adds checked.\n"
-            "To keep the existing layout, click 'New setup' before running this."
-        )
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        btn_row = QHBoxLayout()
-        cancel_btn = PushButton("Cancel")
-        add_btn = PrimaryPushButton(FIF.ADD, "Add")
-        replace_btn = PushButton("Replace all")
-        btn_row.addWidget(cancel_btn)
-        btn_row.addStretch(1)
-        btn_row.addWidget(replace_btn)
-        btn_row.addWidget(add_btn)
-        layout.addLayout(btn_row)
-
-        result = {"replace": False, "accepted": False}
-        cancel_btn.clicked.connect(dlg.reject)
-        add_btn.clicked.connect(
-            lambda: (result.update(accepted=True, replace=False), dlg.accept())
-        )
-        replace_btn.clicked.connect(
-            lambda: (result.update(accepted=True, replace=True), dlg.accept())
-        )
-
-        if dlg.exec() != QDialog.Accepted:
-            return None
-        if not result["accepted"]:
-            return None
-        picked: list[dict] = []
-        for i in range(listw.count()):
-            item = listw.item(i)
-            if item.checkState() == Qt.Checked:
-                picked.append(item.data(Qt.UserRole))
-        return {"picked": picked, "replace": result["replace"]}
-
-    def _apply_auto_detected(self, detected: list[dict], replace: bool) -> None:
-        """Persist the detected windows into the active setup. If
-        ``replace`` is True the current setup's windows are wiped
-        first. The previous setup is preserved as a setup the user
-        can switch back to via the dropdown — no implicit backup
-        layer."""
-        with self._cfg_lock:
-            if replace:
-                self._cfg["bridge"]["windows"] = []
-            existing = self._cfg["bridge"]["windows"]
-            for d in detected:
-                win = default_bridge_window(d.get("name", "Cursor"))
-                win["region"] = [int(v) for v in d["region"]]
-                existing.append(win)
-        self._persist()
-        self._refresh_bridge_windows_table()
-        self._refresh_bridge_setup_combo()
-        self._worker.reset_window_tracking()
-        verb = "replaced with" if replace else "added"
-        msg = f"auto-detect: {verb} {len(detected)} window"
-        if len(detected) != 1:
-            msg += "s"
-        self._bridge_log(msg)
 
     def _find_window_index(self, window_id: str) -> Optional[int]:
         for idx, w in enumerate(self._cfg.get("bridge", {}).get("windows", [])):
             if w.get("id") == window_id:
                 return idx
         return None
-
-    def _recapture_bridge_window_region(self, window_id: str) -> None:
-        idx = self._find_window_index(window_id)
-        if idx is None:
-            return
-        name = self._cfg["bridge"]["windows"][idx].get("name", "Cursor")
-        self._bridge_log(f"re-capture region for '{name}': drag the new box…")
-        bbox = capture_drag_bbox(self)
-        if not bbox:
-            self._bridge_log("re-capture cancelled")
-            return
-        with self._cfg_lock:
-            self._cfg["bridge"]["windows"][idx]["region"] = [int(b) for b in bbox]
-        self._persist()
-        self._refresh_bridge_windows_table()
-        self._bridge_log(
-            f"updated '{name}' region → ({bbox[0]},{bbox[1]}) {bbox[2]}×{bbox[3]}"
-        )
-
-    def _delete_bridge_window(self, window_id: str) -> None:
-        idx = self._find_window_index(window_id)
-        if idx is None:
-            return
-        name = self._cfg["bridge"]["windows"][idx].get("name", "Cursor")
-        with self._cfg_lock:
-            del self._cfg["bridge"]["windows"][idx]
-        self._persist()
-        self._refresh_bridge_windows_table()
-        self._bridge_log(f"removed '{name}'")
-
-    def _move_bridge_window(self, window_id: str, direction: int) -> None:
-        """Swap a window with its neighbour. ``direction`` is -1 for up,
-        +1 for down. Persisting the new order propagates to the phone
-        UI on the next /api/state read so the cards rearrange to match
-        the desktop list (which the user lays out left-to-right per
-        monitor)."""
-        idx = self._find_window_index(window_id)
-        if idx is None:
-            return
-        with self._cfg_lock:
-            windows = self._cfg.get("bridge", {}).get("windows", [])
-            new_idx = idx + direction
-            if not (0 <= new_idx < len(windows)):
-                return
-            windows[idx], windows[new_idx] = windows[new_idx], windows[idx]
-            name = windows[new_idx].get("name", "Cursor")
-        self._persist()
-        self._refresh_bridge_windows_table()
-        self._bridge_log(f"moved '{name}' {'up' if direction < 0 else 'down'}")
 
     def _refresh_bridge_windows_table(self) -> None:
         table = getattr(self, "_bridge_windows_table", None)
@@ -2458,44 +2093,11 @@ class MainWindow(QMainWindow):
             region_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             table.setItem(row, 1, region_item)
 
-            cell = QWidget()
-            cl = QHBoxLayout(cell)
-            cl.setContentsMargins(2, 2, 2, 2)
-            cl.setSpacing(4)
-
-            # Up / down move the window in the list. Edges disable the
-            # button that would walk off the list — saves a no-op log
-            # entry plus the visual cue tells the user "you're already
-            # at the top". The phone reads the list in this order, so
-            # left-to-right monitor layout maps to top-to-bottom rows.
-            up_btn = ToolButton(FIF.UP)
-            up_btn.setToolTip("Move up")
-            up_btn.setEnabled(row > 0)
-            up_btn.clicked.connect(
-                lambda _checked=False, _id=wid: self._move_bridge_window(_id, -1)
-            )
-            down_btn = ToolButton(FIF.DOWN)
-            down_btn.setToolTip("Move down")
-            down_btn.setEnabled(row < len(windows) - 1)
-            down_btn.clicked.connect(
-                lambda _checked=False, _id=wid: self._move_bridge_window(_id, 1)
-            )
-
-            region_btn = ToolButton(FIF.CAMERA)
-            region_btn.setToolTip("Re-capture window region")
-            region_btn.clicked.connect(
-                lambda _checked=False, _id=wid: self._recapture_bridge_window_region(_id)
-            )
-            del_btn = ToolButton(FIF.DELETE)
-            del_btn.setToolTip("Remove this window")
-            del_btn.clicked.connect(
-                lambda _checked=False, _id=wid: self._delete_bridge_window(_id)
-            )
-            cl.addWidget(up_btn)
-            cl.addWidget(down_btn)
-            cl.addWidget(region_btn)
-            cl.addWidget(del_btn)
-            table.setCellWidget(row, 2, cell)
+            # Actions column is empty in the dynamic-tracking model —
+            # windows are managed by Auto-detect, not by per-row
+            # buttons. Rename is still available via the inline
+            # LineEdit in column 0.
+            table.setItem(row, 2, QTableWidgetItem(""))
 
     def _rename_bridge_window(self, window_id: str, new_text: str) -> None:
         new_name = new_text.strip() or "Cursor"
@@ -3614,11 +3216,7 @@ class MainWindow(QMainWindow):
             set_rules_running=self._bridge_set_rules_running,
             rename_window=self._bridge_rename_window,
             auto_detect_windows=self._bridge_auto_detect_windows,
-            new_bridge_setup=self._bridge_new_setup,
-            activate_bridge_setup=self._bridge_activate_setup,
-            delete_bridge_setup=self._bridge_delete_setup,
             workspace_switch=self._bridge_workspace_switch,
-            workspace_bind_active=self._bridge_workspace_bind_active,
             ensure_vapid_keys=self._bridge_ensure_vapid_keys,
             add_push_subscription=self._bridge_add_push_subscription,
             remove_push_subscription=self._bridge_remove_push_subscription,
@@ -3645,6 +3243,11 @@ class MainWindow(QMainWindow):
             self._log(f"  {url}")
             print(f"  {url}", flush=True)
         self._bridge_log(f"service started → {primary_url}")
+        # Auto-detect on bridge start — refresh the tracked window
+        # list against the user's current foreground workspace. Cheap
+        # (a few ms of EnumWindows), preserves any existing renames
+        # via the HWND-keyed merge.
+        QTimer.singleShot(50, lambda: self._auto_detect_replace_now(reason="bridge start"))
 
     def _bridge_request_reload(self) -> None:
         """Called from the bridge's request handler thread when the phone
@@ -3857,128 +3460,54 @@ class MainWindow(QMainWindow):
         self._bridge_log(f"renamed via web → '{new_name}'")
 
     def _bridge_auto_detect_windows(self, mode: str) -> int:
-        """Phone POSTed /api/admin/auto_detect. Runs the Win32
-        enumeration here on the desktop side, mutates the active
-        setup's windows under the cfg lock, and returns the new
-        window count. Returns -1 when nothing was detected.
-
-        The previous "stash a backup setup" safety net is gone — the
-        user explicitly forks via 'New setup' before running this if
-        they want to keep the existing layout. Qt widget refreshes
-        are deferred to the main thread via the
-        bridge_windows_auto_detected signal."""
+        """Phone POSTed /api/admin/auto_detect. Runs the HWND-keyed
+        merge under the cfg lock; returns the new window count (or
+        -1 on detector failure). The `mode` argument is ignored —
+        the simplified model always merges against EnumWindows;
+        renames + chat_target overrides survive across calls."""
+        from press_store import merge_detected_windows
         from press_windows import list_cursor_windows
 
         try:
             detected = list_cursor_windows()
         except Exception:
             return -1
-        if not detected:
-            return -1
-        if mode not in ("add", "replace"):
-            mode = "add"
         with self._cfg_lock:
-            if mode == "replace":
-                self._cfg["bridge"]["windows"] = []
-            for d in detected:
-                win = default_bridge_window(d.get("name", "Cursor"))
-                win["region"] = [int(v) for v in d["region"]]
-                self._cfg["bridge"]["windows"].append(win)
-            new_count = len(self._cfg["bridge"]["windows"])
+            existing = self._cfg.get("bridge", {}).get("windows", []) or []
+            merged = merge_detected_windows(existing, detected)
+            self._cfg["bridge"]["windows"] = merged
+            new_count = len(merged)
         self._persist()
-        self.bridge_windows_auto_detected.emit(len(detected))
+        self.bridge_windows_auto_detected.emit(new_count)
         return new_count
 
     def _on_bridge_windows_auto_detected(self, count: int) -> None:
         self._refresh_bridge_windows_table()
-        self._refresh_bridge_setup_combo()
         self._worker.reset_window_tracking()
         self._bridge_log(
-            f"auto-detect via web → added {count} window"
+            f"auto-detect via web → tracking {count} Cursor window"
             f"{'s' if count != 1 else ''}"
         )
-
-    def _bridge_new_setup(self, name: str) -> str:
-        """POST /api/bridge/setups → create an empty setup, activate
-        it, return the new id. Outgoing setup is auto-mirrored."""
-        from press_store import new_setup
-
-        with self._cfg_lock:
-            sid = new_setup(self._cfg, name)
-        self._persist()
-        self.bridge_setups_changed_remote.emit("new")
-        return sid
-
-    def _bridge_activate_setup(self, setup_id: str) -> bool:
-        """POST /api/bridge/setups/{id}/activate → switch active. Live
-        windows are replaced with the target setup's snapshot;
-        outgoing setup's windows are auto-mirrored first. Returns
-        False if id unknown."""
-        from press_store import activate_setup
-
-        with self._cfg_lock:
-            ok = activate_setup(self._cfg, setup_id)
-        if not ok:
-            return False
-        self._persist()
-        self.bridge_setups_changed_remote.emit("activate")
-        return True
-
-    def _bridge_delete_setup(self, setup_id: str) -> bool:
-        from press_store import delete_setup
-
-        with self._cfg_lock:
-            removed = delete_setup(self._cfg, setup_id)
-        if not removed:
-            return False
-        self._persist()
-        self.bridge_setups_changed_remote.emit("delete")
-        return True
-
-    def _on_bridge_setups_changed_remote(self, action: str) -> None:
-        # All three actions (new, activate, delete) can change the
-        # active setup's windows, so the table needs refreshing too.
-        self._refresh_bridge_setup_combo()
-        self._refresh_bridge_windows_table()
-        self._worker.reset_window_tracking()
-        self._bridge_log(f"setup {action} via web")
 
     def _bridge_workspace_switch(self, direction: str) -> dict:
         """POST /api/bridge/workspace/switch — fires Ctrl+Win+Right
         (next) or Ctrl+Win+Left (prev), waits for the transition,
-        then activates the setup bound to the new workspace if any.
-        Returns a dict with the new workspace_id and active setup id."""
+        then re-runs auto-detect for the new workspace. The poll
+        timer would catch this within 1.5 s anyway; firing
+        synchronously here means the phone's window list reflects
+        the new workspace by the time the endpoint returns."""
         import press_workspace as wsmod
-        from press_store import activate_setup
 
         if direction == "next":
             wsmod.switch_next()
         else:
             wsmod.switch_prev()
         new_wid = wsmod.current_id()
-        # Update the desktop's cached last-seen id so the polling
-        # timer doesn't double-fire the activation log when it next
-        # ticks. Atomic attribute write — safe from this thread.
+        # Update the desktop's cached last-seen id so _poll_workspace
+        # doesn't double-fire the detect when it next ticks.
         self._last_seen_workspace_id = new_wid
-        activated_id: Optional[str] = None
-        if new_wid:
-            with self._cfg_lock:
-                bridge = self._cfg.get("bridge", {}) or {}
-                match = next(
-                    (
-                        s
-                        for s in (bridge.get("setups") or [])
-                        if s.get("workspace_id") == new_wid
-                    ),
-                    None,
-                )
-                if match and match.get("id") != bridge.get("active_setup_id"):
-                    if activate_setup(self._cfg, match["id"]):
-                        activated_id = match["id"]
-            if activated_id is not None:
-                self._persist()
-                self.bridge_setups_changed_remote.emit("workspace-switch")
-        return {"workspace_id": new_wid, "active_setup_id": activated_id}
+        self._auto_detect_replace_now(reason="workspace switch")
+        return {"workspace_id": new_wid}
 
     def _bridge_ensure_vapid_keys(self) -> str:
         """Generate the VAPID keypair on first call, persist both
@@ -4077,29 +3606,6 @@ class MainWindow(QMainWindow):
                 pruned = len(gone_endpoints)
             self._persist()
         return {"sent": sent, "failed": failed, "pruned": pruned}
-
-    def _bridge_workspace_bind_active(self) -> Optional[str]:
-        """POST /api/bridge/workspace/bind — stamp the current
-        workspace's GUID onto the active setup. Returns the GUID."""
-        import press_workspace as wsmod
-
-        wid = wsmod.current_id()
-        if not wid:
-            return None
-        with self._cfg_lock:
-            active_id = self._cfg.get("bridge", {}).get("active_setup_id")
-            if not active_id:
-                return None
-            for s in self._cfg["bridge"].get("setups", []) or []:
-                if s.get("id") == active_id:
-                    s["workspace_id"] = wid
-                    break
-            else:
-                return None
-        self._persist()
-        self._last_seen_workspace_id = wid
-        self.bridge_setups_changed_remote.emit("workspace-bind")
-        return wid
 
     def _bridge_perform_window_send(
         self, window: dict, text: str, bridge_cfg: dict

@@ -117,33 +117,6 @@ button.icon {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.workspace-bar .ws-bind {
-  flex: 0 0 auto;
-  min-width: 36px;
-  padding: 6px 8px;
-  font-size: 14px;
-}
-
-/* Setup row: dropdown takes the flex slack, two action buttons sit
-   on the right. Different from a regular .setting because there's
-   no label — the dropdown self-describes. */
-.setup-row { gap: 6px; }
-.setup-row .setup-select {
-  flex: 1;
-  min-width: 0;
-  padding: 5px 8px;
-  background: var(--card);
-  color: var(--fg);
-  border: 1px solid var(--card-border);
-  border-radius: 6px;
-  font-size: 12px;
-  font-family: inherit;
-}
-.setup-row .setup-select:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
 .setting-hint { margin: 6px 0 4px; font-size: 11px; }
 .setting-hint code {
   background: rgba(255, 255, 255, 0.06);

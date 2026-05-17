@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="stylesheet" href="/static/style.css?v=31">
+  <link rel="stylesheet" href="/static/style.css?v=32">
   <title>auto-press</title>
 </head>
 <body>
@@ -41,20 +41,14 @@
       <span class="setting-name">Auto-detect Cursor windows</span>
       <button id="auto-detect-btn" class="ghost">Detect</button>
     </div>
-    <div class="setting setup-row">
-      <select id="setup-select" class="setup-select"></select>
-      <button id="setup-new-btn" class="ghost">New…</button>
-      <button id="setup-delete-btn" class="ghost icon" aria-label="Delete current setup">✕</button>
-    </div>
     <p class="muted setting-hint">
       Rules automation toggles the desktop Start button — pause auto-clicking
       while reading the agent's output, resume when done. Auto-refresh re-fetches
       window state on the bridge tick cadence (no page flash; backup for when
       SSE drops). Reload re-imports <code>press_bridge.py</code> and restarts
-      the listener. Setup dropdown switches between named window layouts —
-      pick another to load it, "New…" creates a fresh empty setup, ✕ deletes
-      the current one. Auto-detect adds detected Cursor windows to the
-      current setup.
+      the listener. Auto-detect refreshes the tracked windows against the
+      current workspace; it also runs automatically on bridge start and when
+      you switch virtual desktops.
     </p>
   </section>
 
@@ -64,12 +58,12 @@
         <button id="ws-prev" class="ghost ws-arrow" aria-label="Previous workspace">◀</button>
         <span id="ws-label" class="ws-label muted">workspace</span>
         <button id="ws-next" class="ghost ws-arrow" aria-label="Next workspace">▶</button>
-        <button id="ws-bind" class="ghost ws-bind" title="Bind the current setup to this workspace">📌</button>
       </div>
       <ul id="windows" aria-label="Cursor windows"></ul>
       <p id="empty-hint" class="muted" hidden>
-        No windows yet. Open the desktop app, switch to the Bridge tab, capture
-        an idle template, add a window, and turn the Bridge service on.
+        No windows yet. Open the desktop app, switch to the Bridge tab,
+        capture an idle template, and turn the Bridge service on — Cursor
+        windows on the current workspace are detected automatically.
       </p>
     </section>
 
@@ -132,6 +126,6 @@
     <div id="lightbox-tap-hint" class="lightbox-tap-hint">Tap to pick a click point</div>
   </div>
 
-  <script src="/static/app.js?v=31"></script>
+  <script src="/static/app.js?v=32"></script>
 </body>
 </html>
