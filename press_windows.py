@@ -35,15 +35,22 @@ def _pin_thread_v2_dpi() -> None:
 
 
 def _short_label(title: str) -> str:
-    """Trim Cursor's repetitive " - Cursor" suffix so the auto-generated
-    window name reads naturally — "Polish README — auto-press" instead
-    of "Polish README — auto-press — Cursor"."""
-    suffix = " - Cursor"
-    if title.endswith(suffix):
-        title = title[: -len(suffix)]
-    # Some Cursor titles are "PROJECT - filename - Cursor"; the
-    # truncated version above is plenty.
-    return title.strip() or "Cursor"
+    """Keep only the part before the first " - " — Cursor's title
+    template is ``<tab name> - <project> - Cursor`` (and similar
+    variations for SSH sessions). For glanceable tracking the tab
+    name is the only part the user actually recognises; the project
+    + host suffix is noise that pushes the useful bit off the row.
+
+    Examples:
+        "Polish README - auto-press - Cursor"   → "Polish README"
+        "Ch.EST (504) - aerial-framework-3 [SSH: dgx]" → "Ch.EST (504)"
+        "aerial-framework-4 [SSH: dgx]"         → kept whole (no " - ")
+    """
+    parts = title.split(" - ", 1)
+    head = parts[0].strip()
+    if not head and len(parts) > 1:
+        head = parts[1].strip()
+    return head or "Cursor"
 
 
 def list_cursor_windows() -> list[dict]:

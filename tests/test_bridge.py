@@ -1147,12 +1147,19 @@ def test_list_cursor_windows_returns_list_off_windows(monkeypatch):
     assert press_windows.list_cursor_windows() == []
 
 
-def test_short_label_trims_cursor_suffix():
+def test_short_label_keeps_only_part_before_first_separator():
+    """Cursor title template is `<tab name> - <project> - Cursor`
+    (and SSH variants); we keep only the tab name."""
     from press_windows import _short_label
-    assert _short_label("README.md - auto-press - Cursor") == "README.md - auto-press"
+    assert _short_label("README.md - auto-press - Cursor") == "README.md"
     assert _short_label("Foo - Cursor") == "Foo"
     assert _short_label("Standalone") == "Standalone"
-    assert _short_label(" - Cursor") == "Cursor"  # empty → fallback
+    assert _short_label("Ch.EST (504) - aerial-framework-3 [SSH: dgx]") == "Ch.EST (504)"
+    # SSH session with no separator stays whole.
+    assert _short_label("aerial-framework-4 [SSH: dgx]") == "aerial-framework-4 [SSH: dgx]"
+    # Empty / whitespace falls back to a sane default.
+    assert _short_label(" - Cursor") == "Cursor"
+    assert _short_label("") == "Cursor"
 
 
 # ---- Workspace binding ----------------------------------------------------

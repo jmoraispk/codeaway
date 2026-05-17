@@ -953,6 +953,15 @@ def merge_detected_windows(
             updated = dict(prior)
             updated["hwnd"] = h_int
             updated["region"] = [int(v) for v in region]
+            # Re-derive name when the stored value still carries a
+            # " - " separator: that's the signature of a stale
+            # auto-derived title from an older trim (or a fresh
+            # title that's grown since first detection). Names
+            # without " - " are treated as manual renames and
+            # preserved as-is.
+            detected_short = d.get("name")
+            if " - " in (updated.get("name") or "") and detected_short:
+                updated["name"] = detected_short
             out.append(updated)
         else:
             entry = default_bridge_window(d.get("name", "Cursor"))

@@ -301,6 +301,38 @@ def test_merge_detected_windows_preserves_name_and_chat_target_for_known_hwnd():
     assert out["region"] == [100, 100, 900, 700]  # fresh region
 
 
+def test_merge_detected_windows_retrims_stale_auto_derived_names():
+    """Existing entries with " - " in the name are leftover auto-
+    derived titles (or freshly-grown titles); they get re-derived
+    from the detected entry's short label. Renames without " - "
+    stay untouched."""
+    existing = [
+        {
+            "id": "w1",
+            "hwnd": 1234,
+            "name": "Build second brain with X - 2nd-brain",  # stale
+            "region": [0, 0, 800, 600],
+            "chat_target": None,
+        },
+        {
+            "id": "w2",
+            "hwnd": 5678,
+            "name": "Frontend tasks",  # manual rename (no " - ")
+            "region": [0, 0, 800, 600],
+            "chat_target": None,
+        },
+    ]
+    detected = [
+        {"hwnd": 1234, "name": "Build second brain with X", "region": [0, 0, 800, 600]},
+        {"hwnd": 5678, "name": "App.tsx", "region": [0, 0, 800, 600]},
+    ]
+    [w1, w2] = press_store.merge_detected_windows(existing, detected)
+    # Stale " - " name → re-derived to the freshly-trimmed label.
+    assert w1["name"] == "Build second brain with X"
+    # Manual rename (no separator) → preserved unchanged.
+    assert w2["name"] == "Frontend tasks"
+
+
 def test_merge_detected_windows_adds_new_hwnd_and_drops_disappeared():
     """A new HWND in the enumeration produces a fresh entry; an
     existing entry whose HWND vanished from the enumeration is
