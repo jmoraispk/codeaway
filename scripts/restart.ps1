@@ -90,12 +90,31 @@ if ($procs) {
 #    uv's wrapper (no stray cmd window for `uv run`). -WindowStyle Hidden
 #    keeps the python console off-screen so the user only sees the Qt
 #    window come up.
-Step "Launching $python main.py (hidden console)"
+# Redirect stdout / stderr to a rotating log so a startup crash
+# leaves breadcrumbs. The previous Hidden-console launch dropped
+# both, which made "Bridge port never came up" a dead end. Keep one
+# previous log around (.1) so a wedge-then-recovery sequence still
+# has the wedge's output for inspection.
+$logsDir = Join-Path $RepoDir "logs"
+if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir | Out-Null }
+$logOut = Join-Path $logsDir "service.out.log"
+$logErr = Join-Path $logsDir "service.err.log"
+foreach ($f in @($logOut, $logErr)) {
+    if (Test-Path $f) {
+        $bak = "$f.1"
+        if (Test-Path $bak) { Remove-Item $bak -Force -ErrorAction SilentlyContinue }
+        Move-Item $f $bak -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Step "Launching $python main.py (hidden console; logs -> logs\service.{out,err}.log)"
 Start-Process `
     -FilePath $python `
     -ArgumentList "main.py" `
     -WorkingDirectory $RepoDir `
-    -WindowStyle Hidden | Out-Null
+    -WindowStyle Hidden `
+    -RedirectStandardOutput $logOut `
+    -RedirectStandardError $logErr | Out-Null
 
 # 4. Two-stage readiness check. PySide6's cold import + Qt window
 #    construction can take 30 s on first launch, and uvicorn binds the
@@ -112,7 +131,14 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 500
 }
 if (-not $bound) {
-    Write-Host "Bridge port never came up — check the desktop window." -ForegroundColor Yellow
+    Write-Host "Bridge port never came up — check logs\service.err.log." -ForegroundColor Yellow
+    if (Test-Path $logErr) {
+        $tail = Get-Content $logErr -Tail 30 -ErrorAction SilentlyContinue
+        if ($tail) {
+            Write-Host "--- tail of service.err.log ---" -ForegroundColor DarkYellow
+            $tail | ForEach-Object { Write-Host $_ }
+        }
+    }
     exit 1
 }
 Note "Port bound, probing /api/health"

@@ -70,8 +70,10 @@ def main() -> None:
         "seconds",
         nargs="?",
         type=float,
-        default=10.0,
-        help="Default scan interval in seconds. Default: 10",
+        default=None,
+        help="Override the scan interval for this run. When omitted, "
+             "the value persisted to templates/config.json is used "
+             "(falls back to 10 s on first launch).",
     )
     # Both the bridge service and the rules engine are on by default —
     # they're the product. The --no-* flags are the launch-time
@@ -116,6 +118,13 @@ def main() -> None:
         help="Override the bridge port (default from config: 8765).",
     )
     args = parser.parse_args()
+    # Resolve the scan interval: CLI override > persisted config >
+    # hardcoded default. Importing press_store here (rather than at
+    # the top of main.py) keeps `--help` fast on a cold cache.
+    if args.seconds is None:
+        from press_store import load_config
+
+        args.seconds = float(load_config().get("interval_seconds", 10.0) or 10.0)
     if args.seconds <= 0:
         raise SystemExit("seconds must be > 0")
 

@@ -18,3 +18,6 @@ templates/*
 
 # Claude Code per-repo settings
 .claude/
+
+# Runtime logs from restart.ps1 (stdout/stderr capture)
+logs/

@@ -114,18 +114,34 @@ if IS_WINDOWS:
     # within the same thread; that's not an error, the apartment is
     # already initialised.
     _COM_INIT_FLAG = 0x2
-    _com_initialised = False
+    # Per-thread cache. CoInitializeEx must be called on every thread
+    # that touches COM, but cached *per thread* — Qt main, bridge
+    # asyncio loop, and the QTimer callbacks can all hit these
+    # helpers. A single process-wide flag worked while only Qt
+    # main called in; it raced once the bridge thread joined.
+    import threading as _threading
+
+    _com_state = _threading.local()
+    # RPC_E_CHANGED_MODE: 0x80010106 — returned when CoInitializeEx
+    # was already called on this thread with a different apartment
+    # model. Treated as "already up, we're fine" — the existing
+    # apartment can host our calls.
+    _RPC_E_CHANGED_MODE = 0x80010106
 
     def _ensure_com_init() -> bool:
-        global _com_initialised
-        if _com_initialised:
+        if getattr(_com_state, "initialised", False):
             return True
         hr = _CoInitializeEx(None, _COM_INIT_FLAG)
-        # S_OK (0) or S_FALSE (1) both mean "ready to go".
-        if hr in (0, 1):
-            _com_initialised = True
+        # Cast HRESULT to unsigned for the comparison — ctypes returns
+        # a signed int, and 0x80010106 fits there as a negative value.
+        hr_u = hr & 0xFFFFFFFF
+        # S_OK (0) or S_FALSE (1) → first init on this thread.
+        # RPC_E_CHANGED_MODE → another component already initialised
+        # the apartment; we can still make calls.
+        if hr_u in (0, 1, _RPC_E_CHANGED_MODE):
+            _com_state.initialised = True
             return True
-        LOG.warning("CoInitializeEx failed: 0x%08x", hr & 0xFFFFFFFF)
+        LOG.warning("CoInitializeEx failed: 0x%08x", hr_u)
         return False
 
     # Vtable indices for IVirtualDesktopManager. IUnknown takes slots
