@@ -565,14 +565,6 @@ def fastapi_client():
                 return True
         return False
 
-    def auto_detect_windows(mode):
-        calls["auto_detect"].append(mode)
-        # If a test pre-seeds calls["auto_detect_result"], use it;
-        # otherwise the default behaviour is "found 0 windows".
-        return int(calls.get("auto_detect_result", -1))
-
-    calls["auto_detect"] = []
-
     def ensure_vapid_keys():
         # Stable fake key — tests only check that the endpoint
         # returns *some* string, not that it's a real ECDH point.
@@ -621,7 +613,6 @@ def fastapi_client():
         is_rules_running=is_rules_running,
         set_rules_running=set_rules_running,
         rename_window=rename_window,
-        auto_detect_windows=auto_detect_windows,
         ensure_vapid_keys=ensure_vapid_keys,
         add_push_subscription=add_push_subscription,
         remove_push_subscription=remove_push_subscription,
@@ -1086,55 +1077,6 @@ def test_evaluate_bridge_windows_returns_empty_if_template_file_missing():
 
 
 # ---- Auto-detect ----------------------------------------------------------
-
-def test_auto_detect_endpoint_returns_count(fastapi_client):
-    """When the desktop callback reports a positive window count, the
-    endpoint echoes mode + count back as JSON."""
-    client, service, calls = fastapi_client
-    calls["auto_detect_result"] = 3
-    res = client.post("/api/admin/auto_detect", json={"mode": "add"})
-    assert res.status_code == 200
-    assert res.json() == {"mode": "add", "window_count": 3}
-    assert calls["auto_detect"] == ["add"]
-
-
-def test_auto_detect_endpoint_400_when_callback_reports_nothing(fastapi_client):
-    """callback returning -1 means 'nothing detected on this platform' —
-    the endpoint surfaces that as a 400 so the phone can show a sane
-    error instead of silently appending zero windows."""
-    client, service, calls = fastapi_client
-    calls["auto_detect_result"] = -1
-    res = client.post("/api/admin/auto_detect", json={"mode": "add"})
-    assert res.status_code == 400
-
-
-def test_auto_detect_endpoint_defaults_to_add_mode(fastapi_client):
-    """Empty body / missing mode key falls back to the safe choice."""
-    client, service, calls = fastapi_client
-    calls["auto_detect_result"] = 1
-    res = client.post("/api/admin/auto_detect", json={})
-    assert res.status_code == 200
-    assert calls["auto_detect"] == ["add"]
-
-
-def test_auto_detect_endpoint_clamps_invalid_mode(fastapi_client):
-    """Anything other than 'add' / 'replace' is treated as 'add' — the
-    endpoint is a small public surface, don't trust the input."""
-    client, service, calls = fastapi_client
-    calls["auto_detect_result"] = 2
-    res = client.post("/api/admin/auto_detect", json={"mode": "nuke"})
-    assert res.status_code == 200
-    assert calls["auto_detect"] == ["add"]
-
-
-def test_auto_detect_endpoint_501_when_callback_missing(fastapi_client):
-    """If the desktop side didn't wire auto_detect_windows (e.g. older
-    build), the endpoint reports 501 rather than crashing."""
-    client, service, calls = fastapi_client
-    service.callbacks.auto_detect_windows = None
-    res = client.post("/api/admin/auto_detect", json={"mode": "add"})
-    assert res.status_code == 501
-
 
 # ---- press_windows module --------------------------------------------------
 

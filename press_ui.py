@@ -921,10 +921,6 @@ class MainWindow(QMainWindow):
     # the endpoint can return success/failure); this signal exists only
     # to refresh the desktop's bridge windows table on the main thread.
     bridge_window_renamed_remote = Signal(str, str)
-    # Fires after a phone-triggered auto-detect mutates bridge.windows.
-    # The slot redraws the windows table and resets worker tracking on
-    # the Qt main thread.
-    bridge_windows_auto_detected = Signal(int)
 
     CHROME_HEIGHT = 120
 
@@ -944,9 +940,6 @@ class MainWindow(QMainWindow):
         self.hotkey_triggered.connect(self._toggle_running, Qt.QueuedConnection)
         self.bridge_reload_requested.connect(self._reload_bridge_service, Qt.QueuedConnection)
         self.bridge_set_rules_requested.connect(self._set_rules_running_remote, Qt.QueuedConnection)
-        self.bridge_windows_auto_detected.connect(
-            self._on_bridge_windows_auto_detected, Qt.QueuedConnection,
-        )
         self.bridge_window_renamed_remote.connect(
             self._on_bridge_window_renamed_remote, Qt.QueuedConnection
         )
@@ -1992,27 +1985,77 @@ class MainWindow(QMainWindow):
         self._persist()
 
     def _poll_workspace(self) -> None:
-        """Detect virtual-desktop switches and re-run auto-detect for
-        the new workspace. Fires every 1.5 s; cheap no-op when nothing
-        changed (the COM call is <5 ms and EnumWindows itself only
-        runs after a real workspace flip)."""
+        """Fires every 1.5 s. Does two cheap things in order:
+
+        1. Workspace-change detection (~few ms COM call). On a flip,
+           run the full auto-detect so the table swaps to the new
+           workspace's windows.
+        2. Periodic window re-detect (~0.4 ms EnumWindows). Picks up
+           windows that moved / resized / were closed / opened
+           without a workspace flip. Only persists + refreshes the
+           UI when the merged window list actually differs — windows
+           in steady state cost nothing.
+        """
         import press_workspace as wsmod
 
         wid = wsmod.current_id()
-        if not wid or wid == self._last_seen_workspace_id:
+        if wid and wid != self._last_seen_workspace_id:
+            prev = self._last_seen_workspace_id
+            self._last_seen_workspace_id = wid
+            if prev is not None:
+                count = self._auto_detect_replace_now(reason="workspace change")
+                if count >= 0:
+                    self._bridge_log(
+                        f"workspace changed → re-detected {count} Cursor window"
+                        f"{'s' if count != 1 else ''}"
+                    )
+            # Workspace flip already covered this tick's re-detect; skip
+            # the periodic poll to avoid two refreshes in a row.
             return
-        prev = self._last_seen_workspace_id
-        self._last_seen_workspace_id = wid
-        if prev is None:
-            # First poll after launch — don't fire a redundant detect
-            # since the bridge-start hook already runs one.
+        self._poll_windows_for_changes()
+
+    @staticmethod
+    def _windows_equivalent(a: list[dict], b: list[dict]) -> bool:
+        """Cheap structural compare keyed by HWND. Returns True when
+        the two lists describe the same set of windows in the same
+        regions with the same names. Used to short-circuit the
+        periodic re-detect when nothing actually changed — avoids
+        bumping config.json's mtime every 1.5 s on a quiet desktop."""
+        if len(a) != len(b):
+            return False
+        by_h_a = {w.get("hwnd"): w for w in a if w.get("hwnd") is not None}
+        by_h_b = {w.get("hwnd"): w for w in b if w.get("hwnd") is not None}
+        if by_h_a.keys() != by_h_b.keys():
+            return False
+        for h, wa in by_h_a.items():
+            wb = by_h_b[h]
+            if wa.get("region") != wb.get("region"):
+                return False
+            if wa.get("name") != wb.get("name"):
+                return False
+        return True
+
+    def _poll_windows_for_changes(self) -> None:
+        """Periodic HWND-keyed re-merge against EnumWindows. Cheap
+        (~0.4 ms) — runs on the same 1.5 s timer as the workspace
+        poll. Persists + refreshes only on a real diff so steady-
+        state desktops don't churn config.json or the worker."""
+        from press_store import merge_detected_windows
+        from press_windows import list_cursor_windows
+
+        try:
+            detected = list_cursor_windows()
+        except Exception:
             return
-        count = self._auto_detect_replace_now(reason="workspace change")
-        if count >= 0:
-            self._bridge_log(
-                f"workspace changed → re-detected {count} Cursor window"
-                f"{'s' if count != 1 else ''}"
-            )
+        with self._cfg_lock:
+            existing = self._cfg.get("bridge", {}).get("windows", []) or []
+            merged = merge_detected_windows(existing, detected)
+            if self._windows_equivalent(existing, merged):
+                return
+            self._cfg["bridge"]["windows"] = merged
+        self._persist()
+        self._refresh_bridge_windows_table()
+        self._worker.reset_window_tracking()
 
     def _auto_detect_replace_now(self, reason: str = "manual") -> int:
         """Core auto-detect: enumerate Cursor windows, merge into the
@@ -3215,7 +3258,6 @@ class MainWindow(QMainWindow):
             is_rules_running=self._bridge_is_rules_running,
             set_rules_running=self._bridge_set_rules_running,
             rename_window=self._bridge_rename_window,
-            auto_detect_windows=self._bridge_auto_detect_windows,
             workspace_switch=self._bridge_workspace_switch,
             ensure_vapid_keys=self._bridge_ensure_vapid_keys,
             add_push_subscription=self._bridge_add_push_subscription,
@@ -3458,36 +3500,6 @@ class MainWindow(QMainWindow):
     def _on_bridge_window_renamed_remote(self, window_id: str, new_name: str) -> None:
         self._refresh_bridge_windows_table()
         self._bridge_log(f"renamed via web → '{new_name}'")
-
-    def _bridge_auto_detect_windows(self, mode: str) -> int:
-        """Phone POSTed /api/admin/auto_detect. Runs the HWND-keyed
-        merge under the cfg lock; returns the new window count (or
-        -1 on detector failure). The `mode` argument is ignored —
-        the simplified model always merges against EnumWindows;
-        renames + chat_target overrides survive across calls."""
-        from press_store import merge_detected_windows
-        from press_windows import list_cursor_windows
-
-        try:
-            detected = list_cursor_windows()
-        except Exception:
-            return -1
-        with self._cfg_lock:
-            existing = self._cfg.get("bridge", {}).get("windows", []) or []
-            merged = merge_detected_windows(existing, detected)
-            self._cfg["bridge"]["windows"] = merged
-            new_count = len(merged)
-        self._persist()
-        self.bridge_windows_auto_detected.emit(new_count)
-        return new_count
-
-    def _on_bridge_windows_auto_detected(self, count: int) -> None:
-        self._refresh_bridge_windows_table()
-        self._worker.reset_window_tracking()
-        self._bridge_log(
-            f"auto-detect via web → tracking {count} Cursor window"
-            f"{'s' if count != 1 else ''}"
-        )
 
     def _bridge_workspace_switch(self, direction: str) -> dict:
         """POST /api/bridge/workspace/switch — fires Ctrl+Win+Right

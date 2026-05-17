@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="stylesheet" href="/static/style.css?v=32">
+  <link rel="stylesheet" href="/static/style.css?v=33">
   <title>auto-press</title>
 </head>
 <body>
@@ -37,18 +37,13 @@
       <span class="setting-name">Reload bridge service</span>
       <button id="reload-btn" class="ghost">Reload</button>
     </div>
-    <div class="setting">
-      <span class="setting-name">Auto-detect Cursor windows</span>
-      <button id="auto-detect-btn" class="ghost">Detect</button>
-    </div>
     <p class="muted setting-hint">
       Rules automation toggles the desktop Start button — pause auto-clicking
       while reading the agent's output, resume when done. Auto-refresh re-fetches
       window state on the bridge tick cadence (no page flash; backup for when
       SSE drops). Reload re-imports <code>press_bridge.py</code> and restarts
-      the listener. Auto-detect refreshes the tracked windows against the
-      current workspace; it also runs automatically on bridge start and when
-      you switch virtual desktops.
+      the listener. Cursor windows are auto-detected continuously (~1.5 s
+      poll) — open/close/move them on the laptop and the list follows.
     </p>
   </section>
 
@@ -126,6 +121,6 @@
     <div id="lightbox-tap-hint" class="lightbox-tap-hint">Tap to pick a click point</div>
   </div>
 
-  <script src="/static/app.js?v=32"></script>
+  <script src="/static/app.js?v=33"></script>
 </body>
 </html>

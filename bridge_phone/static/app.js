@@ -859,38 +859,6 @@ async function toggleNotifications() {
   }
 }
 
-async function autoDetectWindows() {
-  // Refresh the tracked windows against whatever Cursor windows are
-  // visible on the current workspace. The desktop runs an HWND-keyed
-  // merge so renames + chat_target overrides survive.
-  const btn = $("auto-detect-btn");
-  btn.disabled = true;
-  btn.textContent = "Scanning…";
-  try {
-    const res = await fetch("/api/admin/auto_detect", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "replace" }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      const n = data.window_count || 0;
-      btn.textContent = `Detected (${n})`;
-      setTimeout(() => {
-        btn.disabled = false;
-        btn.textContent = "Detect";
-      }, 1800);
-      return;
-    }
-    const detail = await res.text();
-    alert(`Auto-detect failed: ${res.status} ${detail}`);
-  } catch (e) {
-    alert(`Auto-detect network error: ${e.message}`);
-  }
-  btn.disabled = false;
-  btn.textContent = "Detect";
-}
-
 async function reloadBridge() {
   const ok = confirm(
     "Reload the bridge service? The connection will drop for ~1 second " +
@@ -1183,7 +1151,6 @@ $("notif-test").addEventListener("click", async (e) => {
 })();
 $("autoreload-toggle").addEventListener("click", toggleAutoReload);
 $("reload-btn").addEventListener("click", reloadBridge);
-$("auto-detect-btn").addEventListener("click", autoDetectWindows);
 $("ws-prev").addEventListener("click", (e) => switchWorkspace("prev", e.currentTarget));
 $("ws-next").addEventListener("click", (e) => switchWorkspace("next", e.currentTarget));
 $("rules-toggle").addEventListener("click", toggleRules);
