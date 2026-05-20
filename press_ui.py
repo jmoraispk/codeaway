@@ -2297,8 +2297,17 @@ class MainWindow(QMainWindow):
             cell_lay.addStretch(1)
             self._rules_list.setCellWidget(row, 1, container)
             rule_id = rule["id"]
+            # Capture the checkbox itself in the lambda and read its
+            # current state via isChecked(). The `state` arg from
+            # stateChanged is a raw int (2 = Checked) but in PySide6
+            # 6.11+ Qt.Checked is a strict enum — `state == Qt.Checked`
+            # silently returns False, which had the handler writing
+            # `enabled=False` on every click. isChecked() returns a
+            # plain bool, no enum trap to dodge.
             checkbox.stateChanged.connect(
-                lambda state, rid=rule_id: self._on_rule_enabled_toggled(rid, state)
+                lambda _state=0, rid=rule_id, cb=checkbox: self._on_rule_enabled_toggled(
+                    rid, cb.isChecked()
+                )
             )
 
             action_item = QTableWidgetItem(rule.get("action", ACTION_CLICK))
@@ -2312,14 +2321,16 @@ class MainWindow(QMainWindow):
         else:
             self._clear_editor()
 
-    def _on_rule_enabled_toggled(self, rule_id: str, state: int) -> None:
-        from PySide6.QtCore import Qt as _Qt
-
-        enabled = state == _Qt.Checked
+    def _on_rule_enabled_toggled(self, rule_id: str, enabled: bool) -> None:
+        """Persist the user's enable/disable click on a rule. ``enabled``
+        is the checkbox's current isChecked() value (plain bool) —
+        not the raw int from stateChanged, which used to be compared
+        against Qt.Checked and silently returned False under PySide6's
+        strict-enum equality rules."""
         with self._cfg_lock:
             for r in self._cfg.get("rules", []):
                 if r.get("id") == rule_id:
-                    r["enabled"] = enabled
+                    r["enabled"] = bool(enabled)
                     break
         self._persist()
 
