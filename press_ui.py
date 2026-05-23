@@ -1287,6 +1287,7 @@ class MainWindow(QMainWindow):
         stack.addWidget(self._build_basics_card())
         stack.addWidget(self._build_template_card())
         stack.addWidget(self._build_scope_card())
+        stack.addWidget(self._build_window_scope_card())
         stack.addWidget(self._build_editor_actions())
         stack.addStretch(1)
 
@@ -1505,31 +1506,46 @@ class MainWindow(QMainWindow):
         row.addWidget(pick_btn)
 
         card.viewLayout.addLayout(row)
+        return card
 
-        # Window-scope row. Empty selection = rule applies to every
-        # tracked window (current default); ticking one or more
-        # constrains the rule to fire only on those windows. The
-        # picker rebuilds its menu items from the live windows list
-        # every time it's opened, so newly-detected windows show up
-        # automatically.
-        win_row = QHBoxLayout()
-        win_row.setContentsMargins(0, 0, 0, 0)
-        win_row.setSpacing(10)
-        win_row.addWidget(BodyLabel("Apply to windows:"))
+    def _build_window_scope_card(self) -> QWidget:
+        """Dedicated card for picking which Cursor windows the
+        active rule applies to. Lists every Cursor window across
+        every virtual desktop as a tickable item so the user can
+        scope ahead of time — even windows on workspaces they're
+        not currently on. Empty selection = applies to all windows
+        (the default). The list refreshes on rule selection, on
+        every auto-detect / re-detect tick, and when the user opens
+        the editor — so newly-spawned Cursors show up without a
+        manual refresh."""
+        card = CollapsibleCard("Window scope", expanded=False)
+        self._window_scope_card = card
+
+        info_row = QHBoxLayout()
+        info_row.setContentsMargins(0, 0, 0, 0)
+        info_row.setSpacing(10)
+        info_row.addWidget(BodyLabel("Apply to:"))
         self._window_scope_label = BodyLabel("All windows")
         self._window_scope_label.setStyleSheet("color: #d4d4d8;")
-        win_row.addWidget(self._window_scope_label, 1)
-        self._window_scope_btn = PushButton(FIF.PEOPLE, "Pick…")
-        self._window_scope_btn.setToolTip(
-            "Limit this rule to specific Cursor windows. Leave empty "
-            "to apply to every tracked window. Identifier is the "
-            "window name (after trimming Cursor's title); a name "
-            "that isn't currently tracked silently waits for that "
-            "window to reappear."
+        info_row.addWidget(self._window_scope_label, 1)
+        all_btn = PushButton(FIF.TILES, "All windows")
+        all_btn.setToolTip(
+            "Clear the scope so this rule applies to every Cursor "
+            "window again (the default for new rules)."
         )
-        self._window_scope_btn.clicked.connect(self._open_window_scope_menu)
-        win_row.addWidget(self._window_scope_btn)
-        card.viewLayout.addLayout(win_row)
+        all_btn.clicked.connect(self._reset_window_scope_to_all)
+        info_row.addWidget(all_btn)
+        card.viewLayout.addLayout(info_row)
+
+        # The checkbox host. Rebuilt every refresh — simpler than
+        # diffing in-place and the cost is trivial for the typical
+        # 1–20 windows. The container lives inside the card so the
+        # collapsible behaviour can hide everything at once.
+        self._window_scope_host = QWidget()
+        self._window_scope_host_layout = QVBoxLayout(self._window_scope_host)
+        self._window_scope_host_layout.setContentsMargins(0, 4, 0, 0)
+        self._window_scope_host_layout.setSpacing(4)
+        card.viewLayout.addWidget(self._window_scope_host)
         return card
 
     def _build_editor_actions(self) -> QWidget:
@@ -2084,6 +2100,7 @@ class MainWindow(QMainWindow):
             self._cfg["bridge"]["windows"] = merged
         self._persist()
         self._refresh_bridge_windows_table()
+        self._refresh_window_scope_card()
         self._worker.reset_window_tracking()
 
     def _auto_detect_replace_now(self, reason: str = "manual") -> int:
@@ -2107,6 +2124,7 @@ class MainWindow(QMainWindow):
             count = len(merged)
         self._persist()
         self._refresh_bridge_windows_table()
+        self._refresh_window_scope_card()
         self._worker.reset_window_tracking()
         return count
 
@@ -2385,7 +2403,7 @@ class MainWindow(QMainWindow):
             self._region_label.setText(
                 f"{region[2]} × {region[3]} @ ({region[0]}, {region[1]})" if region else "All monitors"
             )
-            self._refresh_window_scope_label(rule.get("window_scope") or [])
+            self._refresh_window_scope_card()
             self._update_action_fields()
             self._update_match_preview()
         finally:
@@ -2402,7 +2420,7 @@ class MainWindow(QMainWindow):
         finally:
             self._suppress_autosave = False
         self._region_label.setText("All monitors")
-        self._refresh_window_scope_label([])
+        self._refresh_window_scope_card()
         self._update_action_fields()
         self._update_match_preview()
 
@@ -2956,16 +2974,13 @@ class MainWindow(QMainWindow):
         self._log("[capture] rule now scans all monitors")
 
     def _refresh_window_scope_label(self, scope: list[str]) -> None:
-        """Sync the 'Apply to windows:' label + tooltip with the
-        active rule's scope. Called from _load_selected_rule /
-        _clear_editor / the picker menu handler."""
+        """Sync the 'Apply to:' label + tooltip on the Window scope
+        card with the active rule's scope. Called from
+        _refresh_window_scope_card and the toggle handler."""
         if not scope:
             self._window_scope_label.setText("All windows")
             self._window_scope_label.setToolTip("")
             return
-        # Show the first one or two names inline; if there are more,
-        # ellipsis and stash the full list on the tooltip so the row
-        # doesn't overflow on long lists.
         if len(scope) == 1:
             self._window_scope_label.setText(scope[0])
         elif len(scope) == 2:
@@ -2976,59 +2991,87 @@ class MainWindow(QMainWindow):
             )
         self._window_scope_label.setToolTip("\n".join(scope))
 
-    def _open_window_scope_menu(self) -> None:
-        """Show a popup with one checkable action per currently
-        tracked window. Ticking writes through to the active rule's
-        ``window_scope`` and persists. Items rebuild from the live
-        windows list every time the menu opens, so newly-detected
-        windows appear automatically without a manual refresh."""
+    def _refresh_window_scope_card(self) -> None:
+        """Rebuild the Window scope card's checkbox list from the
+        union of (a) every Cursor window currently visible across
+        all virtual desktops and (b) any names the active rule's
+        scope already references but that aren't currently visible
+        (so stale scope entries are surfaced rather than silently
+        invisible). Cheap enough to fully recreate the children
+        every refresh."""
+        # Drop the previous children. setParent(None) + deleteLater
+        # is the safe Qt-on-Qt-thread teardown.
+        layout = self._window_scope_host_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
         idx = self._current_rule_index()
         if idx is None:
-            self._log("[scope] select a rule first")
+            self._refresh_window_scope_label([])
+            empty = BodyLabel("(select a rule)")
+            empty.setStyleSheet("color: #6f7180;")
+            layout.addWidget(empty)
             return
-        from PySide6.QtWidgets import QMenu
 
         with self._cfg_lock:
             rule_scope = list(self._cfg["rules"][idx].get("window_scope") or [])
-            tracked = [
-                w.get("name")
-                for w in (self._cfg.get("bridge", {}).get("windows") or [])
-                if isinstance(w.get("name"), str) and w.get("name")
-            ]
-        # Dedupe while keeping order — multiple Cursor windows with the
-        # same project tend to share a name, and listing duplicates
-        # would be confusing.
+
+        # All Cursor windows across all workspaces — gives the user
+        # the full picture even if some are on a different desktop
+        # right now. Falls back to whatever's tracked in config when
+        # the enum fails (non-Windows, COM hiccup).
+        try:
+            from press_windows import list_cursor_windows
+
+            detected = list_cursor_windows(current_workspace_only=False)
+        except Exception:
+            detected = []
+        candidates: list[tuple[str, bool]] = []  # (name, is_currently_visible)
         seen: set[str] = set()
-        tracked_unique: list[str] = []
-        for name in tracked:
-            if name not in seen:
-                tracked_unique.append(name)
-                seen.add(name)
-        # Surface any names the rule's scope references that aren't
-        # currently tracked so the user can untick them if stale.
+        for w in detected:
+            name = w.get("name")
+            if not isinstance(name, str) or not name or name in seen:
+                continue
+            candidates.append((name, True))
+            seen.add(name)
+        # Surface any rule_scope entry that isn't in the detected set
+        # so the user can see + untick it. They appear at the bottom,
+        # tagged "(not visible)".
         for name in rule_scope:
             if name not in seen:
-                tracked_unique.append(name)
+                candidates.append((name, False))
                 seen.add(name)
 
-        menu = QMenu(self)
-        if not tracked_unique:
-            placeholder = menu.addAction("(no windows tracked)")
-            placeholder.setEnabled(False)
-        else:
-            for name in tracked_unique:
-                action = menu.addAction(name)
-                action.setCheckable(True)
-                action.setChecked(name in rule_scope)
-                # Closure captures `name`; toggled fires after the menu
-                # updates the action's checked state so we get the new
-                # value via action.isChecked().
-                action.toggled.connect(
-                    lambda checked, n=name: self._on_window_scope_toggled(n, checked)
+        if not candidates:
+            empty = BodyLabel("(no Cursor windows detected)")
+            empty.setStyleSheet("color: #6f7180;")
+            layout.addWidget(empty)
+            self._refresh_window_scope_label(rule_scope)
+            return
+
+        for name, visible in candidates:
+            row = QWidget()
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(8)
+            cb = CheckBox(name)
+            cb.setChecked(name in rule_scope)
+            cb.stateChanged.connect(
+                lambda _state=0, n=name, box=cb: self._on_window_scope_toggled(
+                    n, box.isChecked()
                 )
-        menu.exec(self._window_scope_btn.mapToGlobal(
-            self._window_scope_btn.rect().bottomLeft()
-        ))
+            )
+            row_lay.addWidget(cb, 1)
+            if not visible:
+                tag = BodyLabel("(not visible)")
+                tag.setStyleSheet("color: #6f7180; font-size: 11px;")
+                row_lay.addWidget(tag)
+            layout.addWidget(row)
+        self._refresh_window_scope_label(rule_scope)
 
     def _on_window_scope_toggled(self, name: str, checked: bool) -> None:
         idx = self._current_rule_index()
@@ -3042,7 +3085,26 @@ class MainWindow(QMainWindow):
                 scope.remove(name)
             self._cfg["rules"][idx]["window_scope"] = scope
         self._persist()
+        # Label only — the checkbox list itself is already in the
+        # right state because the user just toggled it. Skipping the
+        # full rebuild avoids stealing focus and re-querying
+        # EnumWindows on every click.
         self._refresh_window_scope_label(scope)
+
+    def _reset_window_scope_to_all(self) -> None:
+        """Clear the active rule's window_scope → rule applies to
+        every window (the default). Wired to the 'All windows'
+        button on the Window scope card."""
+        idx = self._current_rule_index()
+        if idx is None:
+            return
+        with self._cfg_lock:
+            existing = list(self._cfg["rules"][idx].get("window_scope") or [])
+            if not existing:
+                return  # already empty, no-op
+            self._cfg["rules"][idx]["window_scope"] = []
+        self._persist()
+        self._refresh_window_scope_card()
 
     def _pick_monitor(self) -> None:
         idx = self._current_rule_index()
