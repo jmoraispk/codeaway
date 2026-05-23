@@ -383,7 +383,17 @@ def evaluate_rule_on_frame(frame_gray, runtime_rule: dict) -> tuple[float, tuple
     return matches[0]
 
 
-def evaluate_rules(runtime_rules: list[dict]) -> tuple[list[dict], list[dict]]:
+def evaluate_rules(
+    runtime_rules: list[dict],
+    windows: list[dict] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Run every enabled rule against the current screen, return
+    (results, actions). ``windows`` is the bridge's tracked-window
+    list (passed straight through from cfg); needed only when a rule
+    has a non-empty ``window_scope``, in which case the rule fires
+    once per matching window with that window's region used as
+    search_region (the regular per-rule search_region is ignored when
+    a scope is set)."""
     if not runtime_rules:
         return [], []
     # Only pay for the full-virtual-screen grab if at least one rule needs it.
@@ -396,10 +406,44 @@ def evaluate_rules(runtime_rules: list[dict]) -> tuple[list[dict], list[dict]]:
     results: list[dict] = []
     actions: list[dict] = []
 
+    # Build a name→region lookup once so the per-rule scope loop is
+    # cheap. Skips windows without a region (which can't be searched).
+    windows_by_name: dict[str, list[list]] = {}
+    if windows:
+        for w in windows:
+            name = w.get("name")
+            region = w.get("region")
+            if not isinstance(name, str) or not region:
+                continue
+            windows_by_name.setdefault(name, []).append(list(region))
+
     for rule in runtime_rules:
         matcher = rule.get("matcher", MATCHER_TEMPLATE)
         pack = rule.get("template_pack")
-        if rule.get("search_region"):
+        scope = rule.get("window_scope") or []
+        if scope:
+            # Per-window scoping: rule fires once per tracked window
+            # whose name is in the scope. The scoped window's region
+            # becomes the search_region for that iteration. Windows
+            # in the scope that aren't currently tracked are silently
+            # skipped (matches the "Silently skip" choice — rule
+            # reactivates when the named window reappears).
+            scoped_matches: list = []
+            for name in scope:
+                for region in windows_by_name.get(name, []):
+                    # Shallow copy of the rule with search_region
+                    # overridden; preserves template_pack + threshold
+                    # etc. Note: template_pack DPI variant lookup
+                    # uses the search_region's monitor (see
+                    # find_rule_matches), so multi-monitor scopes
+                    # still pick the right variant.
+                    scoped_rule = {**rule, "search_region": region}
+                    scoped_matches.extend(find_rule_matches(None, scoped_rule))
+            # Sort by score desc so the action loop fires the
+            # strongest match first when there are several.
+            scoped_matches.sort(key=lambda m: m[0], reverse=True)
+            matches = scoped_matches
+        elif rule.get("search_region"):
             # Rule has its own region — find_rule_matches captures it.
             matches = find_rule_matches(None, rule)
         elif matcher == MATCHER_COLOR:

@@ -126,6 +126,30 @@ def test_rule_schema_round_trips_template_source_dpi(tmp_path, monkeypatch):
     assert loaded_rule["template_source_dpi"] == 1.5
 
 
+def test_rule_window_scope_round_trips_and_dedupes(tmp_path, monkeypatch):
+    """window_scope persists across save/load; normalise strips junk
+    entries and de-duplicates while preserving order."""
+    monkeypatch.setattr(press_store, "TEMPLATES_DIR", tmp_path)
+    monkeypatch.setattr(press_store, "CONFIG_PATH", tmp_path / "config.json")
+
+    cfg = press_store.default_config()
+    rule = press_store.default_rule("Scoped")
+    rule["template_path"] = "rule_y.png"
+    rule["window_scope"] = ["alpha", "  beta  ", "alpha", "", 42, "gamma"]
+    cfg["rules"].append(rule)
+    press_store.save_config(cfg)
+    [loaded_rule] = press_store.load_config()["rules"]
+    # alpha kept once (dedup), beta whitespace-trimmed, "" + 42 dropped.
+    assert loaded_rule["window_scope"] == ["alpha", "beta", "gamma"]
+
+
+def test_rule_default_has_empty_window_scope():
+    """A freshly-created rule applies to every window (current
+    behaviour); scoping is opt-in."""
+    rule = press_store.default_rule("X")
+    assert rule["window_scope"] == []
+
+
 def test_list_template_files_hides_dpi_variants(tmp_path, monkeypatch):
     """Variant files (foo.dpi100.png, …) live on disk alongside the
     base PNG so the matcher can find them, but they shouldn't show

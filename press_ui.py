@@ -567,7 +567,11 @@ class EngineWorker(QObject):
                     rules_should_tick = False
                 else:
                     try:
-                        results, actions = evaluate_rules(runtime_rules)
+                        # Pass tracked windows so rules with a non-empty
+                        # window_scope fire only on those windows. Unscoped
+                        # rules ignore the windows arg.
+                        windows = (cfg.get("bridge") or {}).get("windows", []) or []
+                        results, actions = evaluate_rules(runtime_rules, windows)
                         if actions:
                             execute_matches(actions)
                             for action in actions:
@@ -1501,6 +1505,31 @@ class MainWindow(QMainWindow):
         row.addWidget(pick_btn)
 
         card.viewLayout.addLayout(row)
+
+        # Window-scope row. Empty selection = rule applies to every
+        # tracked window (current default); ticking one or more
+        # constrains the rule to fire only on those windows. The
+        # picker rebuilds its menu items from the live windows list
+        # every time it's opened, so newly-detected windows show up
+        # automatically.
+        win_row = QHBoxLayout()
+        win_row.setContentsMargins(0, 0, 0, 0)
+        win_row.setSpacing(10)
+        win_row.addWidget(BodyLabel("Apply to windows:"))
+        self._window_scope_label = BodyLabel("All windows")
+        self._window_scope_label.setStyleSheet("color: #d4d4d8;")
+        win_row.addWidget(self._window_scope_label, 1)
+        self._window_scope_btn = PushButton(FIF.PEOPLE, "Pick…")
+        self._window_scope_btn.setToolTip(
+            "Limit this rule to specific Cursor windows. Leave empty "
+            "to apply to every tracked window. Identifier is the "
+            "window name (after trimming Cursor's title); a name "
+            "that isn't currently tracked silently waits for that "
+            "window to reappear."
+        )
+        self._window_scope_btn.clicked.connect(self._open_window_scope_menu)
+        win_row.addWidget(self._window_scope_btn)
+        card.viewLayout.addLayout(win_row)
         return card
 
     def _build_editor_actions(self) -> QWidget:
@@ -2356,6 +2385,7 @@ class MainWindow(QMainWindow):
             self._region_label.setText(
                 f"{region[2]} × {region[3]} @ ({region[0]}, {region[1]})" if region else "All monitors"
             )
+            self._refresh_window_scope_label(rule.get("window_scope") or [])
             self._update_action_fields()
             self._update_match_preview()
         finally:
@@ -2372,6 +2402,7 @@ class MainWindow(QMainWindow):
         finally:
             self._suppress_autosave = False
         self._region_label.setText("All monitors")
+        self._refresh_window_scope_label([])
         self._update_action_fields()
         self._update_match_preview()
 
@@ -2923,6 +2954,95 @@ class MainWindow(QMainWindow):
         self._persist(); self._refresh_rule_list(idx)
         self._region_label.setText("All monitors")
         self._log("[capture] rule now scans all monitors")
+
+    def _refresh_window_scope_label(self, scope: list[str]) -> None:
+        """Sync the 'Apply to windows:' label + tooltip with the
+        active rule's scope. Called from _load_selected_rule /
+        _clear_editor / the picker menu handler."""
+        if not scope:
+            self._window_scope_label.setText("All windows")
+            self._window_scope_label.setToolTip("")
+            return
+        # Show the first one or two names inline; if there are more,
+        # ellipsis and stash the full list on the tooltip so the row
+        # doesn't overflow on long lists.
+        if len(scope) == 1:
+            self._window_scope_label.setText(scope[0])
+        elif len(scope) == 2:
+            self._window_scope_label.setText(", ".join(scope))
+        else:
+            self._window_scope_label.setText(
+                f"{scope[0]}, {scope[1]}, +{len(scope) - 2} more"
+            )
+        self._window_scope_label.setToolTip("\n".join(scope))
+
+    def _open_window_scope_menu(self) -> None:
+        """Show a popup with one checkable action per currently
+        tracked window. Ticking writes through to the active rule's
+        ``window_scope`` and persists. Items rebuild from the live
+        windows list every time the menu opens, so newly-detected
+        windows appear automatically without a manual refresh."""
+        idx = self._current_rule_index()
+        if idx is None:
+            self._log("[scope] select a rule first")
+            return
+        from PySide6.QtWidgets import QMenu
+
+        with self._cfg_lock:
+            rule_scope = list(self._cfg["rules"][idx].get("window_scope") or [])
+            tracked = [
+                w.get("name")
+                for w in (self._cfg.get("bridge", {}).get("windows") or [])
+                if isinstance(w.get("name"), str) and w.get("name")
+            ]
+        # Dedupe while keeping order — multiple Cursor windows with the
+        # same project tend to share a name, and listing duplicates
+        # would be confusing.
+        seen: set[str] = set()
+        tracked_unique: list[str] = []
+        for name in tracked:
+            if name not in seen:
+                tracked_unique.append(name)
+                seen.add(name)
+        # Surface any names the rule's scope references that aren't
+        # currently tracked so the user can untick them if stale.
+        for name in rule_scope:
+            if name not in seen:
+                tracked_unique.append(name)
+                seen.add(name)
+
+        menu = QMenu(self)
+        if not tracked_unique:
+            placeholder = menu.addAction("(no windows tracked)")
+            placeholder.setEnabled(False)
+        else:
+            for name in tracked_unique:
+                action = menu.addAction(name)
+                action.setCheckable(True)
+                action.setChecked(name in rule_scope)
+                # Closure captures `name`; toggled fires after the menu
+                # updates the action's checked state so we get the new
+                # value via action.isChecked().
+                action.toggled.connect(
+                    lambda checked, n=name: self._on_window_scope_toggled(n, checked)
+                )
+        menu.exec(self._window_scope_btn.mapToGlobal(
+            self._window_scope_btn.rect().bottomLeft()
+        ))
+
+    def _on_window_scope_toggled(self, name: str, checked: bool) -> None:
+        idx = self._current_rule_index()
+        if idx is None:
+            return
+        with self._cfg_lock:
+            scope = list(self._cfg["rules"][idx].get("window_scope") or [])
+            if checked and name not in scope:
+                scope.append(name)
+            elif not checked and name in scope:
+                scope.remove(name)
+            self._cfg["rules"][idx]["window_scope"] = scope
+        self._persist()
+        self._refresh_window_scope_label(scope)
 
     def _pick_monitor(self) -> None:
         idx = self._current_rule_index()

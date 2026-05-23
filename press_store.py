@@ -29,6 +29,14 @@ def default_rule(name: str = "New Rule") -> dict:
         "name": name,
         "enabled": True,
         "matcher": MATCHER_TEMPLATE,
+        # Per-window scope. Empty list = rule applies everywhere
+        # (current default). Non-empty = rule only fires on windows
+        # whose ``name`` is in the list. Identifier is the window
+        # name (after _short_label trim) because HWNDs change across
+        # Cursor restarts but the project-derived name tends to
+        # repeat. Renaming a window via the UI invalidates a scope
+        # that references the old name — user re-picks in the editor.
+        "window_scope": [],
         "template_path": None,
         # Scale factor the template was captured at (1.0, 1.25, …). New
         # captures generate scaled variants for every supported preset
@@ -208,6 +216,24 @@ def _normalize_rule(rule: dict, priority: int) -> dict:
     base["priority"] = priority
     if not isinstance(base.get("text"), str):
         base["text"] = "continue"
+    # window_scope: list of window names the rule applies to. Trim
+    # any non-string entries, strip whitespace, dedupe while keeping
+    # order. Empty list (or anything that normalises to empty) means
+    # "all windows" — the legacy behaviour.
+    raw_scope = base.get("window_scope")
+    if isinstance(raw_scope, list):
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in raw_scope:
+            if not isinstance(item, str):
+                continue
+            name = item.strip()
+            if name and name not in seen:
+                cleaned.append(name)
+                seen.add(name)
+        base["window_scope"] = cleaned
+    else:
+        base["window_scope"] = []
     if not _valid_region(base.get("search_region")):
         base["search_region"] = None
     tpl = base.get("template_path")

@@ -125,6 +125,87 @@ def test_evaluate_rules_returns_all_matches(monkeypatch):
     assert [action["center"] for action in actions] == [(10, 10), (20, 20), (30, 30)]
 
 
+def test_window_scope_iterates_only_matching_windows(monkeypatch):
+    """A rule with non-empty window_scope fires once per tracked
+    window whose name is in the scope. Unmatched names silently
+    skip. find_rule_matches is called with each window's region as
+    search_region."""
+    captured_regions: list = []
+
+    def fake_find(_frame, rule):
+        captured_regions.append(rule.get("search_region"))
+        # One match per call so we can count how many windows were hit.
+        return [(0.95, (100, 100))]
+
+    monkeypatch.setattr(press_engine, "find_rule_matches", fake_find)
+
+    runtime_rules = [
+        {
+            "id": "r1",
+            "name": "Scoped",
+            "threshold": 0.9,
+            "window_scope": ["alpha", "gamma"],
+            "matcher": "template",
+        }
+    ]
+    windows = [
+        {"name": "alpha", "region": [0, 0, 100, 100]},
+        {"name": "beta", "region": [200, 0, 100, 100]},
+        {"name": "alpha", "region": [400, 0, 100, 100]},  # duplicate name → both fire
+        {"name": "gamma", "region": [600, 0, 100, 100]},
+    ]
+    results, actions = press_engine.evaluate_rules(runtime_rules, windows)
+
+    # alpha (×2) + gamma (×1) = 3 calls; beta skipped because not in scope.
+    assert captured_regions == [[0, 0, 100, 100], [400, 0, 100, 100], [600, 0, 100, 100]]
+    assert results[0]["match_count"] == 3
+
+
+def test_window_scope_dormant_when_no_matching_window(monkeypatch):
+    """Scope references a window name that isn't tracked → rule
+    silently produces no matches. Matches the user's pick of
+    'Silently skip' for the stale-scope case."""
+    monkeypatch.setattr(
+        press_engine,
+        "find_rule_matches",
+        lambda _frame, _rule: [(0.95, (100, 100))],
+    )
+    runtime_rules = [
+        {
+            "id": "r1",
+            "name": "Scoped",
+            "threshold": 0.9,
+            "window_scope": ["nonexistent-project"],
+            "matcher": "template",
+        }
+    ]
+    windows = [{"name": "alpha", "region": [0, 0, 100, 100]}]
+    results, actions = press_engine.evaluate_rules(runtime_rules, windows)
+    assert results[0]["match_count"] == 0
+    assert actions == []
+
+
+def test_empty_window_scope_falls_through_to_legacy_path(monkeypatch):
+    """A rule with empty window_scope behaves exactly like the
+    pre-scope code path — must not regress."""
+    monkeypatch.setattr(press_engine, "capture_screen_gray", lambda: object())
+    monkeypatch.setattr(
+        press_engine, "find_rule_matches", lambda _f, _r: [(0.95, (1, 1))]
+    )
+    runtime_rules = [
+        {
+            "id": "r1",
+            "name": "Unscoped",
+            "threshold": 0.9,
+            "window_scope": [],
+            "matcher": "template",
+        }
+    ]
+    windows = [{"name": "alpha", "region": [0, 0, 100, 100]}]
+    results, _ = press_engine.evaluate_rules(runtime_rules, windows)
+    assert results[0]["match_count"] == 1
+
+
 def test_evaluate_rule_on_frame_returns_best_match(monkeypatch):
     monkeypatch.setattr(
         press_engine,
