@@ -182,6 +182,12 @@ class WindowStore:
                     "score": float(state.get("score", 0.0)),
                     "configured": bool(state.get("configured", False)),
                     "last_update": now,
+                    # Pack id of the agent detected inside this
+                    # window (cursor_agent / claude_code / …), or
+                    # None when no pack detection template matched.
+                    # Stored on every state so summaries() can echo
+                    # it without re-running the matcher.
+                    "detected_agent": state.get("detected_agent"),
                 }
                 entry["state"] = stored
                 # Treat idle and asking as the "user can act now" states.

@@ -142,6 +142,15 @@ from press_store import (
     serialize_template_path,
     template_asset_path,
 )
+from press_packs import (
+    DPI_KEY_FOR_ROLE,
+    PATH_KEY_FOR_ROLE,
+    ROLE_DETECTION,
+    ROLE_IDLE,
+    iter_packs,
+    pack_by_id,
+    template_filename as pack_template_filename,
+)
 
 
 def _infer_template_source_dpi(template_ref: str | None) -> float | None:
@@ -1921,8 +1930,130 @@ class MainWindow(QMainWindow):
         win_card.expanded_changed.connect(self._on_bridge_left_card_toggled)
         log_card.expanded_changed.connect(self._on_bridge_log_card_toggled)
 
+        pack_card = self._build_agent_packs_card()
+        outer.addWidget(pack_card)
+
         outer.addWidget(body_split, 1)
         return page
+
+    def _build_agent_packs_card(self) -> "CollapsibleCard":
+        """Per-agent template captures. Each registered pack gets a
+        two-row block (Detection icon + Idle icon), each row mirrors
+        the existing bridge detection-templates UX (combo + capture +
+        thumb). Detection icons are matched per window and surface as
+        ``detected_agent`` on the engine's window-state events; idle
+        icons are captured here so the engine's upcoming switch from
+        a single global idle template to per-pack idle templates has
+        the data ready without forcing a second migration."""
+        # Starts collapsed — the existing detection-templates card
+        # is the primary surface most users touch every day; this one
+        # only matters when wiring up a new agent type.
+        card = CollapsibleCard("Agent packs", expanded=False)
+        info = ToolButton(FIF.INFO)
+        info.setToolTip(
+            "Capture two icons per agent so the engine can recognise "
+            "which agent is running inside each Cursor window.\n\n"
+            "Detection: a tiny, distinctive glyph that's only present "
+            "when that agent is active (the Cursor chat panel logo, the "
+            "Claude Code prompt symbol, etc.).\n"
+            "Idle: the icon that appears when the agent is ready for "
+            "input (orange burst for Cursor, dotted spinner for Claude "
+            "Code). Captured now, consumed by the engine in a later "
+            "switch.\n\n"
+            "Defaults to start the card collapsed."
+        )
+        info.setFixedSize(22, 22)
+        card.headerLayout.insertWidget(1, info)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(2, 0, 2, 0)
+        body.setSpacing(10)
+
+        # Track widgets per (pack_id, role) so refresh / capture
+        # handlers can locate them without walking the layout.
+        self._pack_combos: dict[tuple[str, str], ComboBox] = {}
+        self._pack_thumbs: dict[tuple[str, str], QLabel] = {}
+
+        for pack in iter_packs():
+            pack_block = QVBoxLayout()
+            pack_block.setSpacing(4)
+            pack_block.setContentsMargins(0, 0, 0, 0)
+
+            header = QHBoxLayout()
+            header.setSpacing(8)
+            header.addWidget(StrongBodyLabel(pack.label))
+            header.addStretch(1)
+            pack_block.addLayout(header)
+
+            hint = CaptionLabel(f"Drag a box around {pack.capture_hint}.")
+            hint.setWordWrap(True)
+            pack_block.addWidget(hint)
+
+            for role, role_label in (
+                (ROLE_DETECTION, "Detection"),
+                (ROLE_IDLE, "Idle"),
+            ):
+                pack_block.addLayout(
+                    self._build_pack_template_row(pack.id, role, role_label)
+                )
+
+            body.addLayout(pack_block)
+
+        card.viewLayout.addLayout(body)
+        return card
+
+    def _build_pack_template_row(
+        self, pack_id: str, role: str, role_label: str
+    ) -> "QHBoxLayout":
+        """Single (combo + thumb + capture) row for one (pack, role)
+        slot. Shape matches the bridge tab's Idle / Question rows so
+        the visual rhythm is consistent down the page. The widgets
+        are registered into ``_pack_combos`` / ``_pack_thumbs`` so
+        the refresh + selection handlers can locate them by id."""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+
+        lbl = BodyLabel(role_label)
+        lbl.setMinimumWidth(72)
+        row.addWidget(lbl)
+
+        thumb = QLabel()
+        thumb.setFixedSize(120, 50)
+        thumb.setAlignment(Qt.AlignCenter)
+        thumb.setStyleSheet(
+            "border: 1px dashed #555; border-radius: 6px; "
+            "background: #1f2129; color: #6f7180; font-size: 11px;"
+        )
+        thumb.setText("(no template)")
+        row.addWidget(thumb)
+        self._pack_thumbs[(pack_id, role)] = thumb
+
+        combo = ComboBox()
+        combo.setMinimumWidth(160)
+        combo.setToolTip(
+            f"Pick a previously-captured template for the {role_label.lower()} "
+            f"slot, or choose (none) to clear it."
+        )
+        combo.currentIndexChanged.connect(
+            lambda _idx, _pid=pack_id, _role=role: self._on_pack_template_selected(
+                _pid, _role
+            )
+        )
+        row.addWidget(combo, 1)
+        self._pack_combos[(pack_id, role)] = combo
+
+        capture_btn = PushButton(FIF.CAMERA, "Capture")
+        capture_btn.setToolTip(
+            f"Drag a bounding box to capture this pack's {role_label.lower()} marker."
+        )
+        capture_btn.clicked.connect(
+            lambda _checked=False, _pid=pack_id, _role=role, _rl=role_label: self._capture_pack_template(
+                _pid, _role, _rl
+            )
+        )
+        row.addWidget(capture_btn)
+
+        return row
 
     # ---- bridge collapse handlers ----
 
@@ -2010,6 +2141,11 @@ class MainWindow(QMainWindow):
             empty_label="(optional)",
         )
         self._refresh_bridge_template_choices()
+        # Pack thumbs + combos share the same on-disk template list,
+        # so they refresh together — no separate trigger needed
+        # elsewhere in the bridge tab.
+        if getattr(self, "_pack_combos", None):
+            self._refresh_pack_template_views()
 
     def _refresh_bridge_template_choices(self) -> None:
         """Repopulate the bridge tab's idle / askuser template combos
@@ -2163,8 +2299,19 @@ class MainWindow(QMainWindow):
                 verdict = "idle"
             else:
                 verdict = "busy"
+            # Append the detected agent when a pack matched — gives
+            # the user immediate feedback on whether the freshly
+            # captured detection icons are actually firing. Stays
+            # silent (no "(none)" noise) when no detection templates
+            # are captured yet.
+            agent_id = state.get("detected_agent")
+            agent_suffix = ""
+            if agent_id:
+                pack = pack_by_id(agent_id)
+                agent_suffix = f" — agent: {pack.label if pack else agent_id}"
             self._bridge_log(
-                f"  • {state['name']}: {verdict} (idle-score {state['score']:.3f})"
+                f"  • {state['name']}: {verdict} "
+                f"(idle-score {state['score']:.3f}){agent_suffix}"
             )
 
     def _capture_bridge_template(
@@ -2230,6 +2377,152 @@ class MainWindow(QMainWindow):
             "askuser_template_source_dpi",
             "askuser",
         )
+
+    # ---- agent packs: per-pack template capture & selection ----
+
+    def _pack_entry_for(self, pack_id: str) -> dict:
+        """Return the live ``bridge.packs[pack_id]`` dict, creating
+        an empty entry under the cfg lock if it's missing. Called by
+        every pack mutator so they don't all repeat the lookup +
+        defaulting. Callers MUST hold ``self._cfg_lock`` while using
+        the returned reference."""
+        from press_packs import default_pack_entry
+
+        packs = self._cfg.setdefault("bridge", {}).setdefault("packs", {})
+        entry = packs.get(pack_id)
+        if not isinstance(entry, dict):
+            entry = default_pack_entry()
+            packs[pack_id] = entry
+        else:
+            # Make sure every expected key exists so downstream reads
+            # don't trip on a partial config that pre-dates a role
+            # addition.
+            defaults = default_pack_entry()
+            for k, v in defaults.items():
+                entry.setdefault(k, v)
+        return entry
+
+    def _refresh_pack_template_views(self) -> None:
+        """Repaint every (pack, role) thumbnail from cfg + refresh the
+        per-row template-picker combos. Called on bridge tab load,
+        after a capture, and after a template-list edit on the rules
+        side so renames / deletes here stay consistent."""
+        bridge_packs = (self._cfg.get("bridge") or {}).get("packs") or {}
+        for (pack_id, role), thumb in (self._pack_thumbs or {}).items():
+            entry = bridge_packs.get(pack_id) or {}
+            path = entry.get(PATH_KEY_FOR_ROLE[role])
+            self._refresh_template_thumb(
+                thumb,
+                path,
+                empty_label="(no template)",
+            )
+        self._refresh_pack_template_choices()
+
+    def _refresh_pack_template_choices(self) -> None:
+        """Populate every pack ComboBox with the disk template list +
+        sync each combo's current item to the cfg value. Mirrors
+        _refresh_bridge_template_choices; same blockSignals dance so
+        the programmatic rebuild doesn't fire the selection handler."""
+        bridge_packs = (self._cfg.get("bridge") or {}).get("packs") or {}
+        files = list_template_files()
+        items = [""] + files
+        for (pack_id, role), combo in (self._pack_combos or {}).items():
+            if combo is None:
+                continue
+            entry = bridge_packs.get(pack_id) or {}
+            current = entry.get(PATH_KEY_FOR_ROLE[role]) or ""
+            combo.blockSignals(True)
+            try:
+                combo.clear()
+                for it in items:
+                    combo.addItem(it if it else "(none)", userData=it)
+                target_idx = 0
+                for i in range(combo.count()):
+                    if combo.itemData(i) == current:
+                        target_idx = i
+                        break
+                combo.setCurrentIndex(target_idx)
+            finally:
+                combo.blockSignals(False)
+
+    def _on_pack_template_selected(self, pack_id: str, role: str) -> None:
+        """User picked an existing template from a pack ComboBox.
+        Persists the choice + inferred source DPI, refreshes the
+        thumb. Empty selection ("(none)") clears the slot."""
+        combos = getattr(self, "_pack_combos", {})
+        combo = combos.get((pack_id, role))
+        if combo is None:
+            return
+        choice = combo.itemData(combo.currentIndex())
+        if choice is None:
+            choice = ""
+        choice = str(choice).strip()
+
+        with self._cfg_lock:
+            entry = self._pack_entry_for(pack_id)
+            current = entry.get(PATH_KEY_FOR_ROLE[role]) or ""
+            if choice == current:
+                return  # programmatic rebuild echo
+            inferred_dpi = _infer_template_source_dpi(choice) if choice else None
+            entry[PATH_KEY_FOR_ROLE[role]] = choice or None
+            entry[DPI_KEY_FOR_ROLE[role]] = inferred_dpi
+        self._persist()
+        thumb = (self._pack_thumbs or {}).get((pack_id, role))
+        self._refresh_template_thumb(thumb, choice, empty_label="(no template)")
+        pack = pack_by_id(pack_id)
+        label = pack.label if pack else pack_id
+        if choice:
+            dpi_note = (
+                f" (source DPI {int(round(inferred_dpi * 100))}%)"
+                if inferred_dpi is not None
+                else ""
+            )
+            self._bridge_log(f"selected {label} {role} template → {choice}{dpi_note}")
+        else:
+            self._bridge_log(f"cleared {label} {role} template")
+
+    def _capture_pack_template(self, pack_id: str, role: str, role_label: str) -> None:
+        """Drag-capture a fresh template for the (pack, role) slot.
+        Writes the base PNG + every DPI variant to
+        ``templates/pack_<pack_id>_<role>.png`` (filename owned by
+        press_packs), stores the relative ref + source scale on the
+        bridge cfg, refreshes the UI."""
+        import press_dpi as dpimod
+        from press_store import write_template_with_dpi_variants
+
+        pack = pack_by_id(pack_id)
+        if pack is None:
+            self._bridge_log(f"unknown pack id: {pack_id}")
+            return
+        try:
+            ensure_vision()
+        except Exception as exc:
+            self._bridge_log(f"capture failed: {exc}")
+            return
+        bbox = capture_drag_bbox(self)
+        if not bbox:
+            self._bridge_log(f"{pack.label} {role} capture cancelled")
+            return
+        try:
+            rgb = capture_screen_rgb(tuple(bbox))
+            source_scale = dpimod.scale_for_region(bbox)
+            filename = pack_template_filename(pack_id, role)
+            path = template_asset_path(filename)
+            written = write_template_with_dpi_variants(path, rgb, source_scale)
+            stored = serialize_template_path(path)
+            with self._cfg_lock:
+                entry = self._pack_entry_for(pack_id)
+                entry[PATH_KEY_FOR_ROLE[role]] = stored
+                entry[DPI_KEY_FOR_ROLE[role]] = source_scale
+            self._persist()
+            self._refresh_pack_template_views()
+            self._bridge_log(
+                f"captured {pack.label} {role_label.lower()} template → {stored} "
+                f"({bbox[2]}×{bbox[3]} px @ {int(round(source_scale * 100))}% DPI, "
+                f"{len(written) - 1} scaled variants)"
+            )
+        except Exception as exc:
+            self._bridge_log(f"capture failed: {exc}")
 
     def _on_bridge_threshold_changed(self, value: float) -> None:
         with self._cfg_lock:
@@ -2733,6 +3026,8 @@ class MainWindow(QMainWindow):
         # the bridge would point at a stale filename until the next
         # full UI rebuild.
         self._refresh_bridge_template_choices()
+        if getattr(self, "_pack_combos", None):
+            self._refresh_pack_template_choices()
 
     def _set_matcher(self, matcher: str) -> None:
         """User clicked the segmented toggle. Persist on the active rule, refresh UI."""
@@ -3961,17 +4256,45 @@ class MainWindow(QMainWindow):
             detected = list_cursor_windows(current_workspace_only=False)
         except Exception:
             detected = []
+        # Look up the last engine tick's detected_agent per window
+        # name so the phone can tell the user which agent each
+        # window is hosting. When the bridge isn't running yet the
+        # summaries list is empty and every entry ends up with
+        # detected_agent=None, which the client treats as "unknown".
+        agent_by_name: dict[str, str] = {}
+        try:
+            bridge_service = getattr(self, "_bridge", None)
+            if bridge_service is not None:
+                for s in bridge_service.windows.summaries():
+                    nm = s.get("name") if isinstance(s, dict) else None
+                    agent = s.get("detected_agent") if isinstance(s, dict) else None
+                    if isinstance(nm, str) and isinstance(agent, str) and agent:
+                        agent_by_name[nm] = agent
+        except Exception:
+            pass
         available: list[dict] = []
         seen: set[str] = set()
         for w in detected:
             name = w.get("name") if isinstance(w, dict) else None
             if isinstance(name, str) and name and name not in seen:
-                available.append({"name": name, "visible": True})
+                available.append(
+                    {
+                        "name": name,
+                        "visible": True,
+                        "detected_agent": agent_by_name.get(name),
+                    }
+                )
                 seen.add(name)
         for r in rules:
             for name in r["window_scope"]:
                 if name not in seen:
-                    available.append({"name": name, "visible": False})
+                    available.append(
+                        {
+                            "name": name,
+                            "visible": False,
+                            "detected_agent": agent_by_name.get(name),
+                        }
+                    )
                     seen.add(name)
         return {"rules": rules, "available_windows": available}
 

@@ -147,6 +147,10 @@ def test_evaluate_bridge_windows_skips_windows_without_region(idle_template, mon
             "asking": False,
             "score": 0.0,
             "configured": False,
+            # Added by agent-pack detection — None when no pack
+            # template matched (always the case for no-region
+            # windows, since we never run the per-pack pass there).
+            "detected_agent": None,
         }
     ]
 

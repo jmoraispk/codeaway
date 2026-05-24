@@ -614,6 +614,26 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
     if isinstance(askuser_ref, str) and askuser_ref.strip():
         askuser_variants = _load_variants(askuser_ref, askuser_src_dpi)
 
+    # Agent-pack detection templates. Iterating ``iter_packs()``
+    # keeps the registry source-of-truth in press_packs; missing /
+    # uncaptured slots silently degrade to "no detected agent".
+    # Threshold reuses the bridge idle threshold for now — these
+    # markers are visually similar in spirit (small, distinctive
+    # UI cues), and a single knob keeps the configuration surface
+    # tight while we validate the approach.
+    from press_packs import PATH_KEY_FOR_ROLE, ROLE_DETECTION, iter_packs, DPI_KEY_FOR_ROLE
+
+    packs_cfg = bridge_cfg.get("packs") or {}
+    pack_variants: list[tuple[str, dict]] = []
+    for pack in iter_packs():
+        entry = packs_cfg.get(pack.id) or {}
+        path = entry.get(PATH_KEY_FOR_ROLE[ROLE_DETECTION])
+        if not path:
+            continue
+        variants = _load_variants(path, entry.get(DPI_KEY_FOR_ROLE[ROLE_DETECTION]))
+        if variants:
+            pack_variants.append((pack.id, variants))
+
     cv2, _np = ensure_vision()
 
     # Group configured windows by monitor. The monitor key is the
@@ -647,6 +667,10 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
                 "gray": None,
                 "idle_matches": [],
                 "askuser_matches": [],
+                # pack_id -> [(score, (cx, cy)), ...], aggregated per
+                # monitor so spatial filtering to each window only
+                # walks lists at most once per pack per window.
+                "pack_matches": {},
             }
         else:
             bucket["windows"].append(window)
@@ -675,6 +699,17 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
                 bucket["askuser_matches"] = _find_matches_in(
                     bucket["gray"], askuser_gray, threshold, mx, my
                 )
+        # Agent-pack detection pass — one matchTemplate per pack
+        # per monitor. Cheap (the detection icons are tiny), but
+        # gated on the pack list so users who haven't captured any
+        # pack templates pay zero cost.
+        for pack_id, variants in pack_variants:
+            tpl = _pick_variant(variants, bucket["scale"])
+            if tpl is None:
+                continue
+            bucket["pack_matches"][pack_id] = _find_matches_in(
+                bucket["gray"], tpl, threshold, mx, my
+            )
 
     def _matches_inside(matches, region):
         """Filter (score, (cx, cy)) entries to those whose centre is
@@ -718,8 +753,28 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
                 "asking": False,
                 "score": 0.0,
                 "configured": False,
+                "detected_agent": None,
             }
         )
+
+    def _best_pack_for_region(pack_matches: dict, region_tuple) -> str | None:
+        """Pick the pack whose detection icon scored highest inside
+        ``region_tuple``. Returns None if no pack matched anywhere
+        in the window. With one tab per project (the user's stated
+        assumption) this collapses to "the one pack that matched";
+        the highest-score tiebreak keeps the result sane when
+        multiple icons happen to share the window."""
+        best_id: str | None = None
+        best_score = 0.0
+        for pid, matches in pack_matches.items():
+            inside = _matches_inside(matches, region_tuple)
+            if not inside:
+                continue
+            score = float(inside[0][0])
+            if score > best_score:
+                best_id = pid
+                best_score = score
+        return best_id
 
     # Windows whose monitor we could resolve — read off the cached
     # per-monitor match lists and spatially filter.
@@ -738,6 +793,7 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
                     "asking": False,
                     "score": 0.0,
                     "configured": True,
+                    "detected_agent": None,
                 }
             )
             continue
@@ -757,6 +813,9 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
             "asking": bool(askuser_inside),
             "score": float(best_idle_score),
             "configured": True,
+            "detected_agent": _best_pack_for_region(
+                bucket.get("pack_matches") or {}, region_tuple
+            ),
         }
         if capture_rgb:
             entry["rgb"] = _slice_window_rgb(bucket, region_tuple)
@@ -780,6 +839,7 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
                     "asking": False,
                     "score": 0.0,
                     "configured": True,
+                    "detected_agent": None,
                 }
             )
             continue
@@ -804,6 +864,24 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
                     region_tuple[1],
                 )
                 is_asking = bool(askuser_matches)
+        # Per-window agent-pack detection: same matcher, scoped to
+        # the window's captured search image. Higher cost than the
+        # per-monitor pass above (one matchTemplate per pack per
+        # unresolved window) but this path only runs on test
+        # benches without a DPI service.
+        pack_matches_local: dict[str, list] = {}
+        for pid, variants in pack_variants:
+            tpl = _pick_variant(variants, target_scale)
+            if tpl is None:
+                continue
+            pack_matches_local[pid] = _find_matches_in(
+                search_gray,
+                tpl,
+                threshold,
+                region_tuple[0],
+                region_tuple[1],
+            )
+        detected_agent = _best_pack_for_region(pack_matches_local, region_tuple)
         entry = {
             "id": window.get("id"),
             "name": window.get("name", "Cursor"),
@@ -811,6 +889,7 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
             "asking": is_asking,
             "score": float(idle_matches[0][0]) if idle_matches else 0.0,
             "configured": True,
+            "detected_agent": detected_agent,
         }
         if capture_rgb:
             entry["rgb"] = rgb

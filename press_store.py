@@ -125,6 +125,17 @@ def default_bridge_config() -> dict:
         # auto-detect preserves user-edited fields (renamed names,
         # chat_target overrides) across re-detects.
         "windows": [],
+        # Agent packs — per-agent template slots captured via the
+        # Bridge tab's "Agent packs" card. The pack list itself is
+        # code-defined (press_packs.iter_packs); this dict only
+        # carries the user-captured filenames + source-DPI metadata
+        # keyed by pack id. Two roles per pack today: ``detection``
+        # (tags a window with the agent running inside it) and
+        # ``idle`` (per-agent idle marker, captured for the
+        # upcoming engine switch — not yet consumed by the matcher).
+        # Missing keys / unknown pack ids normalise to empty entries
+        # so a partial config still loads cleanly.
+        "packs": {},
         # Web Push: VAPID keypair is generated on first launch via
         # press_push.ensure_vapid_keys; both halves live here so the
         # public key stays stable across restarts (otherwise every
@@ -322,6 +333,56 @@ def dpi_variant_path(base_path: Path | str, scale: float) -> Path:
     return base.with_suffix(f".dpi{dpi_tag(scale)}{base.suffix}")
 
 
+def _normalize_packs(value) -> dict:
+    """Per-pack template metadata. Keyed by pack id, each value is a
+    dict with ``<role>_template_path`` + ``<role>_template_source_dpi``
+    fields for every role in ``press_packs.ROLE_IDS``. Unknown pack
+    ids in the loaded config are preserved (so a downgraded app
+    doesn't silently delete the user's captured templates for a pack
+    a newer version knew about); unknown role fields inside an entry
+    are dropped to keep the shape tight.
+
+    Lazy-import press_packs so press_store stays importable in test
+    environments that haven't loaded the rest of the app yet — the
+    pack module has no heavy deps but we keep the rule of one-way
+    imports anyway."""
+    from press_packs import (
+        DPI_KEY_FOR_ROLE,
+        PATH_KEY_FOR_ROLE,
+        ROLE_IDS,
+        default_pack_entry,
+        pack_ids,
+    )
+
+    out: dict[str, dict] = {}
+    seen_ids: set[str] = set()
+    if isinstance(value, dict):
+        for raw_id, raw_entry in value.items():
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                continue
+            pid = raw_id.strip()
+            if pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            entry = default_pack_entry()
+            if isinstance(raw_entry, dict):
+                for role in ROLE_IDS:
+                    path_key = PATH_KEY_FOR_ROLE[role]
+                    dpi_key = DPI_KEY_FOR_ROLE[role]
+                    raw_path = raw_entry.get(path_key)
+                    if isinstance(raw_path, str) and raw_path.strip():
+                        entry[path_key] = raw_path.strip()
+                    entry[dpi_key] = _normalize_dpi(raw_entry.get(dpi_key))
+            out[pid] = entry
+    # Make sure every registered pack id has at least an empty entry
+    # — the UI iterates ``iter_packs()`` and expects the dict lookup
+    # to succeed for every known pack.
+    for pid in pack_ids():
+        if pid not in out:
+            out[pid] = default_pack_entry()
+    return out
+
+
 def _valid_vk(value) -> bool:
     try:
         return 0 <= int(value) <= 0xFFFF
@@ -372,6 +433,7 @@ def _normalize_bridge(bridge: dict | None) -> dict:
     raw_windows = bridge.get("windows")
     if isinstance(raw_windows, list):
         base["windows"] = [_normalize_window(w) for w in raw_windows]
+    base["packs"] = _normalize_packs(bridge.get("packs"))
     # Legacy migration: if the loaded config has setups + active_setup_id
     # (pre-simplification schema), keep whichever windows the active
     # setup carried. ``bridge.windows`` already mirrored the active
@@ -495,6 +557,25 @@ def _self_heal_template_bundles(cfg: dict) -> None:
             continue
         restore_missing_template_base(p, bridge.get(dpi_key))
         regenerate_missing_variants(p, bridge.get(dpi_key))
+    # Per-pack template slots get the same recovery pass. The shape
+    # is uniform (every entry has ``<role>_template_path`` +
+    # ``<role>_template_source_dpi``) so we iterate roles instead of
+    # listing every key explicitly.
+    from press_packs import DPI_KEY_FOR_ROLE, PATH_KEY_FOR_ROLE, ROLE_IDS
+
+    for entry in (bridge.get("packs") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        for role in ROLE_IDS:
+            ref = entry.get(PATH_KEY_FOR_ROLE[role])
+            if not ref:
+                continue
+            p = resolve_template_path(ref)
+            if p is None:
+                continue
+            src_dpi = entry.get(DPI_KEY_FOR_ROLE[role])
+            restore_missing_template_base(p, src_dpi)
+            regenerate_missing_variants(p, src_dpi)
 
 
 def save_config(config: dict) -> None:
