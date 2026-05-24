@@ -132,6 +132,7 @@ from press_store import (
     CONFIG_PATH,
     MATCHER_COLOR,
     MATCHER_TEMPLATE,
+    SUPPORTED_DPI_SCALES,
     default_bridge_window,
     default_rule,
     list_template_files,
@@ -141,6 +142,47 @@ from press_store import (
     serialize_template_path,
     template_asset_path,
 )
+
+
+def _infer_template_source_dpi(template_ref: str | None) -> float | None:
+    """Best-effort recovery of the source DPI scale for a template
+    captured by this app. write_template_with_dpi_variants writes the
+    base file at the source scale and sibling files at each supported
+    target scale (foo.dpi100.png, foo.dpi125.png, …); the base's
+    pixel dimensions therefore match exactly one variant's dimensions
+    (within rounding). We open the base + each variant with PIL and
+    return the matching scale. Returns None when the base is missing,
+    no variants exist, or no variant lines up — callers leave the
+    *_source_dpi cfg key as None and the matcher falls back to
+    legacy (no-DPI-awareness) behaviour."""
+    if not template_ref:
+        return None
+    base = resolve_template_path(template_ref)
+    if base is None or not base.exists():
+        return None
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        with Image.open(base) as im:
+            base_dims = im.size
+    except Exception:
+        return None
+    stem = base.stem
+    suffix = base.suffix or ".png"
+    parent = base.parent
+    for scale in SUPPORTED_DPI_SCALES:
+        variant = parent / f"{stem}.dpi{int(round(scale * 100))}{suffix}"
+        if not variant.exists():
+            continue
+        try:
+            with Image.open(variant) as im:
+                if im.size == base_dims:
+                    return float(scale)
+        except Exception:
+            continue
+    return None
 
 
 IS_WINDOWS = sys.platform.startswith("win")
@@ -925,6 +967,13 @@ class MainWindow(QMainWindow):
     # the endpoint can return success/failure); this signal exists only
     # to refresh the desktop's bridge windows table on the main thread.
     bridge_window_renamed_remote = Signal(str, str)
+    # Fires when a rule is edited via the phone's /api/rules/* endpoints
+    # (enable toggle or window scope replace). Same pattern as the
+    # rename signal: the cfg mutation already happened on the bridge
+    # thread under _cfg_lock, this just wakes the desktop UI so the
+    # rules table + window-scope card show the new state without
+    # waiting for the user to re-select the rule.
+    bridge_rule_changed_remote = Signal(str)
 
     CHROME_HEIGHT = 120
 
@@ -946,6 +995,9 @@ class MainWindow(QMainWindow):
         self.bridge_set_rules_requested.connect(self._set_rules_running_remote, Qt.QueuedConnection)
         self.bridge_window_renamed_remote.connect(
             self._on_bridge_window_renamed_remote, Qt.QueuedConnection
+        )
+        self.bridge_rule_changed_remote.connect(
+            self._on_bridge_rule_changed_remote, Qt.QueuedConnection
         )
 
         setTheme(Theme.DARK)
@@ -1521,6 +1573,39 @@ class MainWindow(QMainWindow):
         card = CollapsibleCard("Window scope", expanded=False)
         self._window_scope_card = card
 
+        # Info button on the card header — matches the pattern used by
+        # the Detection templates / Cursor windows cards. The tooltip
+        # carries the "what does this do" text so the card body itself
+        # stays uncluttered.
+        scope_info = ToolButton(FIF.INFO)
+        scope_info.setToolTip(
+            "Pick which Cursor windows the active rule applies to.\n"
+            "Empty selection = applies to every window (the default).\n"
+            "Tick one or more entries to scope the rule. Windows on\n"
+            "other virtual desktops are listed too so you can scope\n"
+            "ahead of time."
+        )
+        scope_info.setFixedSize(22, 22)
+        card.headerLayout.insertWidget(1, scope_info)
+
+        # Status chip on the card header — shows the current scope
+        # summary ("All windows" / "N windows") without forcing the
+        # user to expand the card. Sits between the header's stretch
+        # and the chevron via insertWidget(count - 1, …) so it always
+        # lands immediately to the left of the chevron regardless of
+        # how many other header widgets get added later.
+        self._window_scope_chip = BodyLabel("All windows")
+        self._window_scope_chip.setStyleSheet(
+            "color: #a1a1aa; font-size: 11px; "
+            "background: rgba(255, 255, 255, 0.04); "
+            "border: 1px solid #2a2d3a; "
+            "border-radius: 999px; "
+            "padding: 2px 10px;"
+        )
+        card.headerLayout.insertWidget(
+            card.headerLayout.count() - 1, self._window_scope_chip
+        )
+
         info_row = QHBoxLayout()
         info_row.setContentsMargins(0, 0, 0, 0)
         info_row.setSpacing(10)
@@ -1534,6 +1619,9 @@ class MainWindow(QMainWindow):
             "window again (the default for new rules)."
         )
         all_btn.clicked.connect(self._reset_window_scope_to_all)
+        # Hold a handle so the refresh path can dim it when scope is
+        # already empty — a no-op button shouldn't look clickable.
+        self._window_scope_all_btn = all_btn
         info_row.addWidget(all_btn)
         card.viewLayout.addLayout(info_row)
 
@@ -1642,6 +1730,17 @@ class MainWindow(QMainWindow):
         )
         self._bridge_template_thumb.setText("(no template)")
         tpl_row.addWidget(self._bridge_template_thumb)
+        self._bridge_idle_template_combo = ComboBox()
+        self._bridge_idle_template_combo.setMinimumWidth(160)
+        self._bridge_idle_template_combo.setToolTip(
+            "Pick a previously-captured template — the bundled idle "
+            "markers ship as 'cursor_idle.png'. Choose '(none)' to "
+            "clear the slot."
+        )
+        self._bridge_idle_template_combo.currentTextChanged.connect(
+            lambda name: self._on_bridge_template_selected("idle", name)
+        )
+        tpl_row.addWidget(self._bridge_idle_template_combo, 1)
         capture_tpl_btn = PrimaryPushButton(FIF.CAMERA, "Capture")
         capture_tpl_btn.clicked.connect(self._capture_bridge_idle_template)
         tpl_row.addWidget(capture_tpl_btn)
@@ -1649,7 +1748,6 @@ class MainWindow(QMainWindow):
         test_tpl_btn.setToolTip("Run idle detection across all configured windows now")
         test_tpl_btn.clicked.connect(self._test_bridge_idle_match)
         tpl_row.addWidget(test_tpl_btn)
-        tpl_row.addStretch(1)
         tpl_body.addLayout(tpl_row)
 
         # Askuser template row — same shape, no Test (we re-use the
@@ -1668,6 +1766,17 @@ class MainWindow(QMainWindow):
         )
         self._bridge_askuser_thumb.setText("(optional)")
         ask_row.addWidget(self._bridge_askuser_thumb)
+        self._bridge_askuser_template_combo = ComboBox()
+        self._bridge_askuser_template_combo.setMinimumWidth(160)
+        self._bridge_askuser_template_combo.setToolTip(
+            "Pick a previously-captured askuser template — bundled "
+            "marker ships as 'cursor_askuser.png'. Choose '(none)' to "
+            "skip asking-state detection."
+        )
+        self._bridge_askuser_template_combo.currentTextChanged.connect(
+            lambda name: self._on_bridge_template_selected("askuser", name)
+        )
+        ask_row.addWidget(self._bridge_askuser_template_combo, 1)
         capture_ask_btn = PushButton(FIF.CAMERA, "Capture")
         capture_ask_btn.setToolTip(
             "Capture a marker for the AskUserQuestion multi-choice prompt"
@@ -1684,7 +1793,6 @@ class MainWindow(QMainWindow):
         )
         test_ask_btn.clicked.connect(self._test_bridge_idle_match)
         ask_row.addWidget(test_ask_btn)
-        ask_row.addStretch(1)
         tpl_body.addLayout(ask_row)
 
         thr_row = QHBoxLayout()
@@ -1901,6 +2009,105 @@ class MainWindow(QMainWindow):
             bridge.get("askuser_template_path"),
             empty_label="(optional)",
         )
+        self._refresh_bridge_template_choices()
+
+    def _refresh_bridge_template_choices(self) -> None:
+        """Repopulate the bridge tab's idle / askuser template combos
+        from disk + sync each combo's current text to the matching cfg
+        path. Called on bridge tab load, after a capture (so a fresh
+        file shows up), and from _refresh_template_choices so a rename
+        / delete on the rules side propagates here too. blockSignals
+        around the rebuild so the programmatic refresh doesn't fire
+        _on_bridge_template_selected as a side effect."""
+        bridge = self._cfg.get("bridge") or {}
+        files = list_template_files()
+        # The leading "" entry maps to "(none)" in the UI dropdown —
+        # selecting it clears the slot, which is meaningful for both
+        # idle (disable bridge detection) and askuser (skip the
+        # asking-state probe).
+        items = [""] + files
+        for combo, key in (
+            (getattr(self, "_bridge_idle_template_combo", None), "idle_template_path"),
+            (getattr(self, "_bridge_askuser_template_combo", None), "askuser_template_path"),
+        ):
+            if combo is None:
+                continue
+            current = bridge.get(key) or ""
+            combo.blockSignals(True)
+            try:
+                combo.clear()
+                for it in items:
+                    combo.addItem(it if it else "(none)", userData=it)
+                # Find the item whose userData matches the cfg value.
+                # We display "(none)" for "" so a plain setCurrentText
+                # would miss the empty case.
+                target_idx = 0
+                for i in range(combo.count()):
+                    if combo.itemData(i) == current:
+                        target_idx = i
+                        break
+                combo.setCurrentIndex(target_idx)
+            finally:
+                combo.blockSignals(False)
+
+    def _on_bridge_template_selected(self, slot: str, _name: str) -> None:
+        """User picked a template from the bridge tab's idle / askuser
+        combo. Read the underlying userData (the bare filename, "" for
+        the (none) entry), write it into cfg, infer source DPI from
+        sibling variants when possible, persist, refresh the thumb.
+
+        ``slot`` is "idle" or "askuser". The combo's currentTextChanged
+        signal hands us the display text ("(none)" or the filename),
+        but we read the canonical value from itemData(currentIndex) so
+        the (none) → "" mapping doesn't depend on the display string.
+        """
+        if slot == "idle":
+            combo = getattr(self, "_bridge_idle_template_combo", None)
+            path_key = "idle_template_path"
+            dpi_key = "idle_template_source_dpi"
+        elif slot == "askuser":
+            combo = getattr(self, "_bridge_askuser_template_combo", None)
+            path_key = "askuser_template_path"
+            dpi_key = "askuser_template_source_dpi"
+        else:
+            return
+        if combo is None:
+            return
+        choice = combo.itemData(combo.currentIndex())
+        if choice is None:
+            choice = ""
+        choice = str(choice).strip()
+
+        bridge = self._cfg.get("bridge") or {}
+        current = bridge.get(path_key) or ""
+        if choice == current:
+            return  # no-op; just the programmatic refresh re-firing
+
+        inferred_dpi = _infer_template_source_dpi(choice) if choice else None
+        with self._cfg_lock:
+            self._cfg["bridge"][path_key] = choice or None
+            self._cfg["bridge"][dpi_key] = inferred_dpi
+        self._persist()
+        # Refresh only the thumb — re-running the full template-view
+        # refresh would rebuild the combos and chase its own tail.
+        self._refresh_template_thumb(
+            getattr(
+                self,
+                "_bridge_template_thumb" if slot == "idle" else "_bridge_askuser_thumb",
+                None,
+            ),
+            choice,
+            empty_label="(no template)" if slot == "idle" else "(optional)",
+        )
+        if choice:
+            dpi_note = (
+                f" (source DPI {int(round(inferred_dpi * 100))}%)"
+                if inferred_dpi is not None
+                else ""
+            )
+            self._bridge_log(f"selected {slot} template → {choice}{dpi_note}")
+        else:
+            self._bridge_log(f"cleared {slot} template")
 
     def _refresh_template_thumb(self, thumb, path, empty_label="(no template)") -> None:
         """Render ``path`` into ``thumb`` (a QLabel), or the empty
@@ -2521,6 +2728,11 @@ class MainWindow(QMainWindow):
         self._template_combo.setCurrentText(current if current in items else "")
         self._template_combo.blockSignals(False)
         self._update_match_preview()
+        # Bridge tab combos draw from the same on-disk file set —
+        # rename / delete on the rules side has to land here too, or
+        # the bridge would point at a stale filename until the next
+        # full UI rebuild.
+        self._refresh_bridge_template_choices()
 
     def _set_matcher(self, matcher: str) -> None:
         """User clicked the segmented toggle. Persist on the active rule, refresh UI."""
@@ -2976,10 +3188,24 @@ class MainWindow(QMainWindow):
     def _refresh_window_scope_label(self, scope: list[str]) -> None:
         """Sync the 'Apply to:' label + tooltip on the Window scope
         card with the active rule's scope. Called from
-        _refresh_window_scope_card and the toggle handler."""
+        _refresh_window_scope_card and the toggle handler.
+
+        Also updates the header chip + the reset button's enabled
+        state so the card's collapsed/expanded view stay in sync —
+        the chip is the user's at-a-glance read when the body is
+        hidden, and a no-op "All windows" button shouldn't look
+        clickable when the scope is already empty.
+        """
+        chip = getattr(self, "_window_scope_chip", None)
+        all_btn = getattr(self, "_window_scope_all_btn", None)
         if not scope:
             self._window_scope_label.setText("All windows")
             self._window_scope_label.setToolTip("")
+            if chip is not None:
+                chip.setText("All windows")
+                chip.setToolTip("")
+            if all_btn is not None:
+                all_btn.setEnabled(False)
             return
         if len(scope) == 1:
             self._window_scope_label.setText(scope[0])
@@ -2990,6 +3216,13 @@ class MainWindow(QMainWindow):
                 f"{scope[0]}, {scope[1]}, +{len(scope) - 2} more"
             )
         self._window_scope_label.setToolTip("\n".join(scope))
+        if chip is not None:
+            chip.setText(
+                f"{len(scope)} window{'' if len(scope) == 1 else 's'}"
+            )
+            chip.setToolTip("\n".join(scope))
+        if all_btn is not None:
+            all_btn.setEnabled(True)
 
     def _refresh_window_scope_card(self) -> None:
         """Rebuild the Window scope card's checkbox list from the
@@ -3456,6 +3689,9 @@ class MainWindow(QMainWindow):
             add_push_subscription=self._bridge_add_push_subscription,
             remove_push_subscription=self._bridge_remove_push_subscription,
             send_push_to_all=self._bridge_send_push_to_all,
+            rules_snapshot=self._bridge_rules_snapshot,
+            set_rule_enabled=self._bridge_set_rule_enabled,
+            set_rule_window_scope=self._bridge_set_rule_window_scope,
         )
         self._bridge = BridgeService(callbacks)
         self._bridge.start(bridge_cfg)
@@ -3693,6 +3929,150 @@ class MainWindow(QMainWindow):
     def _on_bridge_window_renamed_remote(self, window_id: str, new_name: str) -> None:
         self._refresh_bridge_windows_table()
         self._bridge_log(f"renamed via web → '{new_name}'")
+
+    def _bridge_rules_snapshot(self) -> dict:
+        """Phone hit GET /api/rules. Build the minimal projection the
+        Window-specific rules settings section needs: each rule's id /
+        name / enabled / window_scope, plus a single ``available_windows``
+        list the per-rule pickers all share.
+
+        ``available_windows`` is the union of (a) every Cursor window
+        currently visible across every virtual desktop and (b) any
+        name referenced by some rule's scope but not currently
+        detected — same logic as the desktop's window-scope card
+        (_refresh_window_scope_card), tagged ``visible: False`` so
+        the phone can render them with "(not visible)" hints.
+        """
+        with self._cfg_lock:
+            rules = [
+                {
+                    "id": r.get("id"),
+                    "name": r.get("name") or "(unnamed)",
+                    "enabled": bool(r.get("enabled", False)),
+                    "window_scope": list(r.get("window_scope") or []),
+                }
+                for r in self._cfg.get("rules", [])
+                if isinstance(r, dict) and isinstance(r.get("id"), str)
+            ]
+
+        try:
+            from press_windows import list_cursor_windows
+
+            detected = list_cursor_windows(current_workspace_only=False)
+        except Exception:
+            detected = []
+        available: list[dict] = []
+        seen: set[str] = set()
+        for w in detected:
+            name = w.get("name") if isinstance(w, dict) else None
+            if isinstance(name, str) and name and name not in seen:
+                available.append({"name": name, "visible": True})
+                seen.add(name)
+        for r in rules:
+            for name in r["window_scope"]:
+                if name not in seen:
+                    available.append({"name": name, "visible": False})
+                    seen.add(name)
+        return {"rules": rules, "available_windows": available}
+
+    def _bridge_set_rule_enabled(self, rule_id: str, enabled: bool) -> bool:
+        """Phone hit PUT /api/rules/{id}/enabled. Mirrors what the
+        desktop's per-row checkbox does in _on_rule_enabled_toggled —
+        flip the flag under the cfg lock, persist, emit a refresh
+        signal. Returns True if the rule was found."""
+        found = False
+        with self._cfg_lock:
+            for r in self._cfg.get("rules", []):
+                if isinstance(r, dict) and r.get("id") == rule_id:
+                    r["enabled"] = bool(enabled)
+                    found = True
+                    break
+        if found:
+            self._persist()
+            self.bridge_rule_changed_remote.emit(rule_id)
+        return found
+
+    def _bridge_set_rule_window_scope(self, rule_id: str, scope: list[str]) -> bool:
+        """Phone hit PUT /api/rules/{id}/scope with the full desired
+        window_scope list. Normalises the same way press_store does
+        (strip, dedupe, drop non-strings) so the disk-side stays
+        canonical no matter what the phone sends, then persists +
+        emits a refresh signal."""
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in scope or []:
+            if not isinstance(item, str):
+                continue
+            name = item.strip()
+            if name and name not in seen:
+                cleaned.append(name)
+                seen.add(name)
+        found = False
+        with self._cfg_lock:
+            for r in self._cfg.get("rules", []):
+                if isinstance(r, dict) and r.get("id") == rule_id:
+                    r["window_scope"] = cleaned
+                    found = True
+                    break
+        if found:
+            self._persist()
+            self.bridge_rule_changed_remote.emit(rule_id)
+        return found
+
+    def _on_bridge_rule_changed_remote(self, rule_id: str) -> None:
+        """Reflect a phone-driven edit on the desktop with the
+        minimum possible UI churn. A full _refresh_rule_list() rebuild
+        recreates every cell widget (each new CheckBox() momentarily
+        materialises as a top-level window before it's reparented
+        into the table cell), producing a visible flicker on every
+        toggle. Instead, locate the rule's row and patch just its
+        enable checkbox in place — no widgets created, no flicker.
+
+        For the editor side, the only field a phone edit can touch is
+        the window-scope card. We refresh that and skip
+        _load_selected_rule() entirely so the rest of the editor (
+        template combo, threshold spin, preview) doesn't redraw."""
+        rules = self._cfg.get("rules", [])
+        target_row = -1
+        target_rule = None
+        for idx, r in enumerate(rules):
+            if isinstance(r, dict) and r.get("id") == rule_id:
+                target_row = idx
+                target_rule = r
+                break
+        if target_rule is None:
+            self._bridge_log(f"rule edited via web → {rule_id} (not found locally)")
+            return
+
+        # Patch the enable checkbox in column 1 in place. blockSignals
+        # so updating the state programmatically doesn't refire the
+        # _on_rule_enabled_toggled handler.
+        try:
+            cell = self._rules_list.cellWidget(target_row, 1)
+            if cell is not None:
+                cb = cell.findChild(CheckBox)
+                if cb is not None:
+                    cb.blockSignals(True)
+                    try:
+                        cb.setChecked(bool(target_rule.get("enabled", False)))
+                    finally:
+                        cb.blockSignals(False)
+        except Exception:
+            # Fall back to a full rebuild if the targeted update can't
+            # find the cell for any reason — better a brief flicker
+            # than the desktop showing stale state.
+            try:
+                self._refresh_rule_list()
+            except Exception:
+                pass
+
+        current = self._current_rule()
+        if current is not None and current.get("id") == rule_id:
+            try:
+                self._refresh_window_scope_card()
+            except Exception:
+                pass
+        self._bridge_log(f"rule edited via web → {rule_id}")
 
     def _bridge_workspace_switch(self, direction: str) -> dict:
         """POST /api/bridge/workspace/switch — fires Ctrl+Win+Right

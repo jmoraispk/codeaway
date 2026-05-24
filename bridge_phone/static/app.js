@@ -960,6 +960,280 @@ async function toggleRules() {
   }
 }
 
+// ---- per-rule window-scope editor (settings panel) ---------------------
+//
+// Mirror of the desktop's Window-scope card, projected per-rule onto the
+// phone. The panel stays hidden behind the cog so the main flow isn't
+// cluttered; opens lazily (first expand triggers loadRulesScope) and
+// re-fetches on each mutation so the view tracks the authoritative
+// server state without an SSE round-trip.
+
+state.rulesScopeLoaded = false;
+state.rulesScope = { rules: [], available_windows: [] };
+// Per-rule UI state: {ruleId: bool} — whether the window picker is
+// currently open. Defaults to closed; the user expands it explicitly
+// via the "Scope: All windows / Specific" tap row so the panel stays
+// compact when several rules are configured.
+state.rulesScopeOpen = {};
+
+async function loadRulesScope() {
+  try {
+    const res = await fetch("/api/rules");
+    if (!res.ok) {
+      state.rulesScope = { rules: [], available_windows: [] };
+      renderRulesScope();
+      return;
+    }
+    const data = await res.json();
+    state.rulesScope = {
+      rules: Array.isArray(data.rules) ? data.rules : [],
+      available_windows: Array.isArray(data.available_windows)
+        ? data.available_windows
+        : [],
+    };
+    state.rulesScopeLoaded = true;
+    renderRulesScope();
+  } catch {
+    state.rulesScope = { rules: [], available_windows: [] };
+    renderRulesScope();
+  }
+}
+
+function renderRulesScope() {
+  const list = $("rules-scope-list");
+  const empty = $("rules-scope-empty");
+  list.innerHTML = "";
+  const rules = state.rulesScope.rules || [];
+  empty.hidden = rules.length > 0;
+  if (rules.length === 0) return;
+
+  // Pool every name we might want to show per rule: the cross-workspace
+  // detected set plus any name referenced by a scope (so stale entries
+  // are still tickable). The server already de-dupes both into
+  // available_windows; we tag visibility on a name lookup.
+  const visibilityByName = new Map();
+  for (const w of state.rulesScope.available_windows || []) {
+    if (w && typeof w.name === "string") {
+      visibilityByName.set(w.name, w.visible !== false);
+    }
+  }
+
+  for (const rule of rules) {
+    const block = document.createElement("div");
+    block.className = "rule-block";
+    block.dataset.ruleId = rule.id;
+
+    const head = document.createElement("div");
+    head.className = "rule-head";
+    const nameEl = document.createElement("span");
+    nameEl.className = "rule-name";
+    nameEl.textContent = rule.name || rule.id;
+    const enableBtn = document.createElement("button");
+    enableBtn.className = "ghost rule-enable";
+    enableBtn.textContent = rule.enabled ? "on" : "off";
+    enableBtn.classList.toggle("on", !!rule.enabled);
+    enableBtn.addEventListener("click", () =>
+      toggleRuleEnabled(rule.id, !rule.enabled)
+    );
+    head.appendChild(nameEl);
+    head.appendChild(enableBtn);
+    block.appendChild(head);
+
+    const scope = Array.isArray(rule.window_scope) ? rule.window_scope : [];
+    const isAll = scope.length === 0;
+    const open = !!state.rulesScopeOpen[rule.id];
+
+    // Scope row: single-tap surface that summarises the current state
+    // (All windows / N windows) and toggles the picker open. Keeping
+    // the window list collapsed by default is the whole point — a
+    // user with five rules sees five tidy lines, not 25 checkboxes.
+    const scopeRow = document.createElement("button");
+    scopeRow.type = "button";
+    scopeRow.className = "rule-scope-row";
+    scopeRow.classList.toggle("open", open);
+    scopeRow.setAttribute("aria-expanded", String(open));
+    const label = document.createElement("span");
+    label.className = "rule-scope-label";
+    label.textContent = isAll
+      ? "All windows"
+      : `${scope.length} window${scope.length === 1 ? "" : "s"} selected`;
+    const chevron = document.createElement("span");
+    chevron.className = "rule-scope-chev";
+    chevron.textContent = "▾";
+    scopeRow.appendChild(label);
+    scopeRow.appendChild(chevron);
+    scopeRow.addEventListener("click", () => {
+      state.rulesScopeOpen[rule.id] = !state.rulesScopeOpen[rule.id];
+      renderRulesScope();
+    });
+    block.appendChild(scopeRow);
+
+    if (!open) {
+      list.appendChild(block);
+      continue;
+    }
+
+    // Picker body — the "All windows" pill sits at the top as a quick
+    // way to reset back to the default, then the per-window checkboxes.
+    // Stale entries (referenced by the scope but not currently
+    // detected) appear at the bottom tagged "(not visible)" so a user
+    // can untick them without first switching workspaces on the
+    // laptop.
+    const body = document.createElement("div");
+    body.className = "rule-scope-body";
+
+    const allRow = document.createElement("button");
+    allRow.type = "button";
+    allRow.className = "rule-all-pill";
+    allRow.classList.toggle("active", isAll);
+    allRow.textContent = isAll ? "All windows ✓" : "Use all windows";
+    allRow.addEventListener("click", () => clearRuleScope(rule.id));
+    body.appendChild(allRow);
+
+    const seen = new Set();
+    const rowsWrap = document.createElement("div");
+    rowsWrap.className = "rule-window-rows";
+    for (const w of state.rulesScope.available_windows || []) {
+      if (!w || typeof w.name !== "string") continue;
+      const name = w.name;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const inScope = scope.includes(name);
+      rowsWrap.appendChild(
+        buildScopeRow(rule.id, name, inScope, w.visible !== false)
+      );
+    }
+    for (const name of scope) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      rowsWrap.appendChild(
+        buildScopeRow(rule.id, name, true, visibilityByName.get(name) ?? false)
+      );
+    }
+    if (!rowsWrap.children.length) {
+      const none = document.createElement("p");
+      none.className = "muted rule-no-windows";
+      none.textContent = "No Cursor windows detected yet.";
+      body.appendChild(none);
+    } else {
+      body.appendChild(rowsWrap);
+    }
+
+    block.appendChild(body);
+    list.appendChild(block);
+  }
+}
+
+function buildScopeRow(ruleId, name, checked, visible) {
+  const row = document.createElement("label");
+  row.className = "rule-window-row";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.checked = checked;
+  cb.addEventListener("change", () =>
+    toggleRuleWindow(ruleId, name, cb.checked)
+  );
+  const nameEl = document.createElement("span");
+  nameEl.className = "rule-window-name";
+  nameEl.textContent = name;
+  row.appendChild(cb);
+  row.appendChild(nameEl);
+  if (!visible) {
+    const tag = document.createElement("span");
+    tag.className = "rule-window-tag";
+    tag.textContent = "(not visible)";
+    row.appendChild(tag);
+  }
+  return row;
+}
+
+async function toggleRuleEnabled(ruleId, next) {
+  // Optimistic flip on the local rule entry so the toggle reacts on
+  // tap. Server PUT is the authoritative confirm; failure rolls back
+  // and re-renders the original state.
+  const rule = (state.rulesScope.rules || []).find((r) => r.id === ruleId);
+  if (!rule) return;
+  const prev = !!rule.enabled;
+  rule.enabled = !!next;
+  renderRulesScope();
+  try {
+    const res = await fetch(`/api/rules/${encodeURIComponent(ruleId)}/enabled`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !!next }),
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      alert(`Rule toggle failed: ${res.status} ${detail}`);
+      rule.enabled = prev;
+      renderRulesScope();
+    }
+  } catch (e) {
+    alert(`Rule toggle network error: ${e.message}`);
+    rule.enabled = prev;
+    renderRulesScope();
+  }
+}
+
+async function toggleRuleWindow(ruleId, name, checked) {
+  const rule = (state.rulesScope.rules || []).find((r) => r.id === ruleId);
+  if (!rule) return;
+  const prev = Array.isArray(rule.window_scope) ? [...rule.window_scope] : [];
+  const nextScope = checked
+    ? (prev.includes(name) ? prev : [...prev, name])
+    : prev.filter((n) => n !== name);
+  rule.window_scope = nextScope;
+  renderRulesScope();
+  await putRuleScope(rule, prev, nextScope);
+}
+
+async function clearRuleScope(ruleId) {
+  const rule = (state.rulesScope.rules || []).find((r) => r.id === ruleId);
+  if (!rule) return;
+  const prev = Array.isArray(rule.window_scope) ? [...rule.window_scope] : [];
+  if (prev.length === 0) return;
+  rule.window_scope = [];
+  renderRulesScope();
+  await putRuleScope(rule, prev, []);
+}
+
+async function putRuleScope(rule, prevScope, nextScope) {
+  try {
+    const res = await fetch(`/api/rules/${encodeURIComponent(rule.id)}/scope`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ window_scope: nextScope }),
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      alert(`Rule scope update failed: ${res.status} ${detail}`);
+      rule.window_scope = prevScope;
+      renderRulesScope();
+    }
+  } catch (e) {
+    alert(`Rule scope network error: ${e.message}`);
+    rule.window_scope = prevScope;
+    renderRulesScope();
+  }
+}
+
+function toggleRulesScopePanel() {
+  const panel = $("rules-scope-panel");
+  const btn = $("rules-scope-toggle");
+  const expanded = panel.hidden;
+  panel.hidden = !expanded;
+  btn.setAttribute("aria-expanded", String(expanded));
+  // Chevron rotates via CSS; toggling a class is the cleanest way to
+  // keep the arrow direction in sync without re-reading layout.
+  btn.classList.toggle("expanded", expanded);
+  if (expanded) {
+    // Always re-fetch on expand so the picker reflects the desktop's
+    // current rule set + cross-workspace window list. Cheap call;
+    // running auto-detect on the desktop is already on the hot path.
+    loadRulesScope();
+  }
+}
+
 // ---- scroll / recapture the open window --------------------------------
 
 async function recaptureWindow(btn) {
@@ -1154,6 +1428,23 @@ $("reload-btn").addEventListener("click", reloadBridge);
 $("ws-prev").addEventListener("click", (e) => switchWorkspace("prev", e.currentTarget));
 $("ws-next").addEventListener("click", (e) => switchWorkspace("next", e.currentTarget));
 $("rules-toggle").addEventListener("click", toggleRules);
+$("rules-scope-toggle").addEventListener("click", toggleRulesScopePanel);
+
+// Info buttons in the settings panel — each (i) reveals/hides the
+// matching <p class="setting-info" data-info="..."> paragraph. One
+// delegated handler so adding a new setting only needs the HTML
+// pieces (button + paragraph with the same data-info key).
+for (const btn of document.querySelectorAll(".info-btn[data-info]")) {
+  btn.addEventListener("click", () => {
+    const key = btn.dataset.info;
+    const target = document.querySelector(`.setting-info[data-info="${key}"]`);
+    if (!target) return;
+    const show = target.hidden;
+    target.hidden = !show;
+    btn.setAttribute("aria-expanded", String(show));
+    btn.classList.toggle("active", show);
+  });
+}
 for (const btn of document.querySelectorAll(".scroll-btn[data-amount]")) {
   const amount = Number(btn.dataset.amount || "1");
   btn.addEventListener("click", () => scrollWindow(amount, btn));

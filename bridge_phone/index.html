@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="stylesheet" href="/static/style.css?v=33">
+  <link rel="stylesheet" href="/static/style.css?v=35">
   <title>auto-press</title>
 </head>
 <body>
@@ -22,29 +22,58 @@
   <section id="settings-panel" hidden>
     <div class="setting">
       <span class="setting-name">Rules automation</span>
+      <button class="ghost info-btn" data-info="rules" aria-label="About Rules automation" aria-expanded="false">i</button>
       <button id="rules-toggle" class="ghost">off</button>
     </div>
+    <p class="setting-info muted" data-info="rules" hidden>
+      Toggles the desktop Start button — pause auto-clicking while reading
+      the agent's output, resume when done.
+    </p>
     <div class="setting">
       <span class="setting-name">Notifications</span>
+      <button class="ghost info-btn" data-info="notif" aria-label="About Notifications" aria-expanded="false">i</button>
       <button id="notif-test" class="ghost" title="Send a test push to verify the round-trip">Test</button>
       <button id="notif-toggle" class="ghost">off</button>
     </div>
+    <p class="setting-info muted" data-info="notif" hidden>
+      Web Push notifications when a window flips to idle or asks for input.
+      Grant permission on first tap; the "Test" button sends a smoke
+      notification to verify the round-trip.
+    </p>
     <div class="setting">
       <span class="setting-name">Auto-refresh page</span>
+      <button class="ghost info-btn" data-info="autoreload" aria-label="About Auto-refresh" aria-expanded="false">i</button>
       <button id="autoreload-toggle" class="ghost">off</button>
     </div>
+    <p class="setting-info muted" data-info="autoreload" hidden>
+      Re-fetches window state on the bridge tick cadence (no page flash;
+      backup for when SSE drops).
+    </p>
     <div class="setting">
       <span class="setting-name">Reload bridge service</span>
+      <button class="ghost info-btn" data-info="reload" aria-label="About Reload" aria-expanded="false">i</button>
       <button id="reload-btn" class="ghost">Reload</button>
     </div>
-    <p class="muted setting-hint">
-      Rules automation toggles the desktop Start button — pause auto-clicking
-      while reading the agent's output, resume when done. Auto-refresh re-fetches
-      window state on the bridge tick cadence (no page flash; backup for when
-      SSE drops). Reload re-imports <code>press_bridge.py</code> and restarts
-      the listener. Cursor windows are auto-detected continuously (~1.5 s
-      poll) — open/close/move them on the laptop and the list follows.
+    <p class="setting-info muted" data-info="reload" hidden>
+      Re-imports <code>press_bridge.py</code> and restarts the listener —
+      picks up bridge-only code edits without restarting the desktop app.
     </p>
+    <div class="setting">
+      <span class="setting-name">Window-specific rules</span>
+      <button class="ghost info-btn" data-info="rules-scope" aria-label="About Window-specific rules" aria-expanded="false">i</button>
+      <button id="rules-scope-toggle" class="ghost icon" aria-label="Expand window-specific rules" aria-expanded="false">▾</button>
+    </div>
+    <p class="setting-info muted" data-info="rules-scope" hidden>
+      Per-rule window scope. "All windows" applies the rule everywhere.
+      Switch to specific scope and tick the windows the rule should fire on.
+      Changes land within one engine tick.
+    </p>
+    <section id="rules-scope-panel" class="rules-scope-panel" hidden>
+      <p id="rules-scope-empty" class="muted rules-scope-empty" hidden>
+        No rules configured yet — add one from the desktop app first.
+      </p>
+      <div id="rules-scope-list"></div>
+    </section>
   </section>
 
   <main>
@@ -121,6 +150,6 @@
     <div id="lightbox-tap-hint" class="lightbox-tap-hint">Tap to pick a click point</div>
   </div>
 
-  <script src="/static/app.js?v=33"></script>
+  <script src="/static/app.js?v=35"></script>
 </body>
 </html>

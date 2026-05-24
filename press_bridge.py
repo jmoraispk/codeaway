@@ -100,6 +100,18 @@ class BridgeCallbacks:
     # subscription. Returns ``{"sent": int, "failed": int,
     # "pruned": int}`` so the test endpoint can echo a summary.
     send_push_to_all: Optional[Callable[[dict], dict]] = None
+    # Per-rule editing surface for the phone's "Window-specific rules"
+    # settings section. ``rules_snapshot`` returns a small projection of
+    # the cfg shaped ``{"rules": [{id, name, enabled, window_scope},
+    # ...], "available_windows": [{name, visible}, ...]}`` — only the
+    # fields the phone needs (no template paths, thresholds, etc.).
+    # The set_* callbacks return True iff the rule id was found; the
+    # host side is responsible for persisting and refreshing its own
+    # UI. Both reuse rule.window_scope / rule.enabled as-is, no
+    # schema change.
+    rules_snapshot: Optional[Callable[[], dict]] = None
+    set_rule_enabled: Optional[Callable[[str, bool], bool]] = None
+    set_rule_window_scope: Optional[Callable[[str, list[str]], bool]] = None
 
 
 # ---- per-window state + snapshot ring buffer ----------------------------
@@ -897,6 +909,61 @@ def build_app(service: BridgeService):
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return JSONResponse({"running": running})
+
+    @app.get("/api/rules")
+    async def rules_get() -> JSONResponse:
+        """Snapshot for the phone's 'Window-specific rules' settings
+        section. Returns the minimal rule projection (id, name,
+        enabled, window_scope) plus the cross-workspace list of
+        Cursor windows the picker can choose from, each tagged
+        ``visible: bool`` (False = referenced by a scope but not
+        currently detected, surfaced so stale entries can still be
+        unticked)."""
+        if service.callbacks.rules_snapshot is None:
+            raise HTTPException(status_code=501, detail="rules snapshot not wired")
+        try:
+            return JSONResponse(service.callbacks.rules_snapshot())
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.put("/api/rules/{rule_id}/enabled")
+    async def rule_set_enabled(rule_id: str, payload: dict) -> JSONResponse:
+        """Toggle rule.enabled from the phone. Mirrors the rule
+        checkbox in the desktop UI: persists immediately and lands
+        on the engine within one tick."""
+        if service.callbacks.set_rule_enabled is None:
+            raise HTTPException(status_code=501, detail="rule edit not wired")
+        if not isinstance(payload, dict) or not isinstance(payload.get("enabled"), bool):
+            raise HTTPException(status_code=400, detail="enabled (bool) required")
+        try:
+            found = service.callbacks.set_rule_enabled(rule_id, payload["enabled"])
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if not found:
+            raise HTTPException(status_code=404, detail="rule not found")
+        return JSONResponse({"enabled": payload["enabled"]})
+
+    @app.put("/api/rules/{rule_id}/scope")
+    async def rule_set_scope(rule_id: str, payload: dict) -> JSONResponse:
+        """Replace a rule's window_scope wholesale. Empty list = the
+        rule applies to all windows (same convention as the desktop
+        picker). The host side normalises entries (strip, dedupe)
+        before persisting, so the phone can PUT whatever it has and
+        the server resolves the canonical form."""
+        if service.callbacks.set_rule_window_scope is None:
+            raise HTTPException(status_code=501, detail="rule edit not wired")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="window_scope (list) required")
+        scope = payload.get("window_scope")
+        if not isinstance(scope, list) or any(not isinstance(s, str) for s in scope):
+            raise HTTPException(status_code=400, detail="window_scope must be a list of strings")
+        try:
+            found = service.callbacks.set_rule_window_scope(rule_id, scope)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if not found:
+            raise HTTPException(status_code=404, detail="rule not found")
+        return JSONResponse({"window_scope": scope})
 
     @app.post("/api/admin/reload")
     async def admin_reload() -> JSONResponse:

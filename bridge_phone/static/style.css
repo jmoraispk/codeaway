@@ -117,13 +117,167 @@ button.icon {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.setting-hint { margin: 6px 0 4px; font-size: 11px; }
-.setting-hint code {
+/* Info buttons — small circular "i" beside each setting that toggles
+   the matching .setting-info paragraph below the row. Muted at rest,
+   accent-tinted when the paragraph is open so the user can spot which
+   info is currently shown. The selector hops up to button.info-btn so
+   it outranks the .setting button padding rule above. */
+button.info-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  font-style: italic;
+  font-weight: 600;
+  color: var(--muted);
+  border-radius: 50%;
+}
+button.info-btn:hover { color: var(--accent); }
+button.info-btn.active {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.setting-info {
+  margin: 2px 0 6px 4px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 2px solid var(--card-border);
+  border-radius: 0 4px 4px 0;
+}
+.setting-info code {
   background: rgba(255, 255, 255, 0.06);
   padding: 1px 4px;
   border-radius: 3px;
   font-size: 10px;
 }
+
+/* Window-specific rules — collapsible sub-panel behind the settings
+   cog. Indented one notch under its setting row so the visual nesting
+   reads at a glance. Stays unobtrusive: muted dividers between rule
+   blocks, small type for the per-window list. */
+#rules-scope-toggle.expanded { transform: rotate(180deg); }
+.rules-scope-panel {
+  margin: 2px 0 6px;
+  padding: 4px 4px 4px 10px;
+  border-left: 2px solid var(--card-border);
+}
+.rules-scope-empty { margin: 6px 2px; font-size: 12px; }
+.rule-block {
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--card-border);
+}
+.rule-block:last-child { border-bottom: none; }
+.rule-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.rule-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rule-enable {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  font-size: 12px;
+  min-width: 42px;
+}
+.rule-enable.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+/* Scope row — single tap surface per rule. Stays slim so several
+   rules don't stack visually; the chevron rotates on open so the
+   open/closed state is obvious without colour. */
+.rule-scope-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.rule-scope-row:hover { border-color: var(--accent); }
+.rule-scope-label { flex: 1; }
+.rule-scope-chev {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+.rule-scope-row.open .rule-scope-chev { transform: rotate(180deg); }
+.rule-scope-body {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* "All windows" pill — the at-the-top reset. Reads "All windows ✓"
+   when active (scope empty) and "Use all windows" when not, so a
+   single tap tells the user both "this is the default" and "tap me
+   to go back to it". */
+.rule-all-pill {
+  align-self: flex-start;
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: 999px;
+}
+.rule-all-pill.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.rule-window-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.rule-window-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  font-size: 13px;
+  min-height: 28px;
+  cursor: pointer;
+}
+.rule-window-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.rule-window-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rule-window-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--muted);
+}
+.rule-no-windows { margin: 2px 0; font-size: 12px; }
 
 main { display: flex; flex-direction: column; gap: 14px; }
 
