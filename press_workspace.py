@@ -105,10 +105,6 @@ if IS_WINDOWS:
     _GetForegroundWindow.argtypes = []
     _GetForegroundWindow.restype = HWND
 
-    _GetDesktopWindow = _user32.GetDesktopWindow
-    _GetDesktopWindow.argtypes = []
-    _GetDesktopWindow.restype = HWND
-
     # COINIT_APARTMENTTHREADED = 0x2 — IVirtualDesktopManager is fine
     # in STA. CoInitializeEx returns S_FALSE (1) on subsequent calls
     # within the same thread; that's not an error, the apartment is
@@ -127,6 +123,15 @@ if IS_WINDOWS:
     # model. Treated as "already up, we're fine" — the existing
     # apartment can host our calls.
     _RPC_E_CHANGED_MODE = 0x80010106
+    # TYPE_E_ELEMENTNOTFOUND: 0x8002802B — IVirtualDesktopManager
+    # returns this when the supplied HWND isn't tracked on any virtual
+    # desktop. Plenty of legit windows hit that path: tooltips,
+    # transient popups, console windows whose conhost owns them, and
+    # the root desktop window itself. We degrade gracefully (return
+    # None → caller treats as "no workspace flip"), so a warning every
+    # 1.5 s would just be noise. Anything else still warns so a
+    # genuine COM regression remains visible.
+    _TYPE_E_ELEMENTNOTFOUND = 0x8002802B
 
     def _ensure_com_init() -> bool:
         if getattr(_com_state, "initialised", False):
@@ -200,17 +205,25 @@ def current_id() -> Optional[str]:
     try:
         hwnd = _GetForegroundWindow()
         if not hwnd:
-            # No foreground window — fall back to the desktop window
-            # itself, which is always present and on the current
-            # virtual desktop.
-            hwnd = _GetDesktopWindow()
-            if not hwnd:
-                return None
+            # No foreground window — nothing useful to query. The
+            # old fallback to GetDesktopWindow() always failed with
+            # TYPE_E_ELEMENTNOTFOUND (the root desktop HWND isn't
+            # registered with the virtual desktop manager), so it
+            # only added log noise on every poll.
+            return None
         get_id = _call_vtbl(mgr, _VTBL_GET_WINDOW_DESKTOP_ID, _GetWindowDesktopId_t)
         guid_out = _GUID()
         hr = get_id(mgr, hwnd, byref(guid_out))
         if hr != S_OK:
-            LOG.warning("GetWindowDesktopId failed: 0x%08x", hr & 0xFFFFFFFF)
+            hr_u = hr & 0xFFFFFFFF
+            # Expected for tooltips / transient popups / console
+            # hosts — we degrade gracefully and a poll fires every
+            # 1.5 s, so a warning would flood the log. Anything else
+            # is genuinely unexpected and keeps its WARNING level.
+            if hr_u == _TYPE_E_ELEMENTNOTFOUND:
+                LOG.debug("GetWindowDesktopId: hwnd not tracked (0x%08x)", hr_u)
+            else:
+                LOG.warning("GetWindowDesktopId failed: 0x%08x", hr_u)
             return None
         return _guid_to_string(guid_out)
     finally:
