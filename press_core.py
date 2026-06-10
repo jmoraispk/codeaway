@@ -27,6 +27,191 @@ def _pin_thread_v2_dpi() -> None:
     except Exception:
         pass
 
+
+# ---- Win32 SendInput primitives ------------------------------------------
+#
+# Why we don't just use pyautogui's moveTo + click:
+#   1. pyautogui calls moveTo and click as separate WinAPI invocations
+#      (SetCursorPos, then mouse_event). Between those calls, physical
+#      mouse-hardware events arriving on the user's input queue can shift
+#      the cursor — so the click lands at "wherever the cursor is when
+#      mouse_event fires", not at our intended target. That's the
+#      "teleport, then click somewhere else" symptom when the user is
+#      actively moving the mouse as a rule triggers.
+#   2. If the user is mid-drag (holding a mouse button) when our action
+#      fires, pyautogui's mouseDown is a no-op (button already down) and
+#      its mouseUp releases the user's drag instead of completing a
+#      clean click on the target.
+#
+# Both problems collapse with SendInput: one batched call queues every
+# event together and MSDN guarantees that "all of the events from a
+# single SendInput call are processed before any subsequent input is
+# processed" — so physical events can't interleave between our MOVE,
+# DOWN, UP, MOVE-back queue. And we prepend a "release any held mouse
+# buttons" pass so a mid-drag user doesn't hijack the click sequence.
+
+if sys.platform.startswith("win"):
+    import ctypes as _ctypes
+    from ctypes import wintypes as _wintypes
+
+    _user32 = _ctypes.WinDLL("user32", use_last_error=True)
+
+    _INPUT_MOUSE = 0
+
+    _MOUSEEVENTF_MOVE = 0x0001
+    _MOUSEEVENTF_LEFTDOWN = 0x0002
+    _MOUSEEVENTF_LEFTUP = 0x0004
+    _MOUSEEVENTF_RIGHTDOWN = 0x0008
+    _MOUSEEVENTF_RIGHTUP = 0x0010
+    _MOUSEEVENTF_MIDDLEDOWN = 0x0020
+    _MOUSEEVENTF_MIDDLEUP = 0x0040
+    _MOUSEEVENTF_ABSOLUTE = 0x8000
+    _MOUSEEVENTF_VIRTUALDESK = 0x4000
+
+    _VK_LBUTTON = 0x01
+    _VK_RBUTTON = 0x02
+    _VK_MBUTTON = 0x04
+
+    _SM_XVIRTUALSCREEN = 76
+    _SM_YVIRTUALSCREEN = 77
+    _SM_CXVIRTUALSCREEN = 78
+    _SM_CYVIRTUALSCREEN = 79
+
+    # ULONG_PTR is 8 bytes on 64-bit Python — c_void_p has the right size
+    # on both 32 and 64 bit, which is what the docs recommend for this
+    # opaque ptr-sized field.
+    _ULONG_PTR = _ctypes.c_void_p
+
+    class _MOUSEINPUT(_ctypes.Structure):
+        _fields_ = [
+            ("dx", _ctypes.c_long),
+            ("dy", _ctypes.c_long),
+            ("mouseData", _wintypes.DWORD),
+            ("dwFlags", _wintypes.DWORD),
+            ("time", _wintypes.DWORD),
+            ("dwExtraInfo", _ULONG_PTR),
+        ]
+
+    class _INPUT_UNION(_ctypes.Union):
+        _fields_ = [("mi", _MOUSEINPUT)]
+
+    class _INPUT(_ctypes.Structure):
+        _anonymous_ = ("u",)
+        _fields_ = [
+            ("type", _wintypes.DWORD),
+            ("u", _INPUT_UNION),
+        ]
+
+    _user32.SendInput.argtypes = [
+        _wintypes.UINT,
+        _ctypes.POINTER(_INPUT),
+        _ctypes.c_int,
+    ]
+    _user32.SendInput.restype = _wintypes.UINT
+
+    _user32.GetSystemMetrics.argtypes = [_ctypes.c_int]
+    _user32.GetSystemMetrics.restype = _ctypes.c_int
+
+    _user32.GetAsyncKeyState.argtypes = [_ctypes.c_int]
+    _user32.GetAsyncKeyState.restype = _ctypes.c_short
+
+    def _mouse_input(flags: int, dx: int = 0, dy: int = 0) -> _INPUT:
+        ev = _INPUT()
+        ev.type = _INPUT_MOUSE
+        ev.mi = _MOUSEINPUT(dx, dy, 0, flags, 0, None)
+        return ev
+
+    def _send_inputs(events: list) -> None:
+        if not events:
+            return
+        arr_type = _INPUT * len(events)
+        arr = arr_type(*events)
+        _user32.SendInput(len(events), arr, _ctypes.sizeof(_INPUT))
+
+    def _to_absolute_xy(x: int, y: int) -> tuple[int, int]:
+        """Convert physical-pixel screen coords to the 0–65535 absolute
+        range MOUSEEVENTF_ABSOLUTE + MOUSEEVENTF_VIRTUALDESK expects.
+        Anchored to the virtual desktop so negative-coord secondary
+        monitors map correctly."""
+        vleft = _user32.GetSystemMetrics(_SM_XVIRTUALSCREEN)
+        vtop = _user32.GetSystemMetrics(_SM_YVIRTUALSCREEN)
+        vwidth = _user32.GetSystemMetrics(_SM_CXVIRTUALSCREEN) or 1
+        vheight = _user32.GetSystemMetrics(_SM_CYVIRTUALSCREEN) or 1
+        # The classic formula uses (range - 1) in the denominator so the
+        # right / bottom edge maps to exactly 65535.
+        dx = round((int(x) - vleft) * 65535 / max(1, vwidth - 1))
+        dy = round((int(y) - vtop) * 65535 / max(1, vheight - 1))
+        # Clamp — SendInput silently clips out-of-range absolutes which
+        # tends to land clicks at (0, 0). Better to land at the nearest
+        # edge of the virtual screen.
+        dx = max(0, min(65535, dx))
+        dy = max(0, min(65535, dy))
+        return dx, dy
+
+    def _release_held_mouse_buttons() -> tuple[bool, bool, bool]:
+        """If the user is physically holding L/R/M when our action
+        fires, send the matching UP events first so the in-flight drag
+        terminates cleanly at the user's current position before we
+        move the cursor to our target. Without this, our move would
+        drag whatever they were dragging to the target and our click
+        would be swallowed as the drag's release."""
+        def _down(vk: int) -> bool:
+            # High bit of GetAsyncKeyState's SHORT = currently pressed.
+            return bool(_user32.GetAsyncKeyState(vk) & 0x8000)
+
+        l = _down(_VK_LBUTTON)
+        r = _down(_VK_RBUTTON)
+        m = _down(_VK_MBUTTON)
+        events = []
+        if l:
+            events.append(_mouse_input(_MOUSEEVENTF_LEFTUP))
+        if r:
+            events.append(_mouse_input(_MOUSEEVENTF_RIGHTUP))
+        if m:
+            events.append(_mouse_input(_MOUSEEVENTF_MIDDLEUP))
+        if events:
+            _send_inputs(events)
+        return (l, r, m)
+
+    def _click_at_target(
+        x: int,
+        y: int,
+        restore_position: tuple[int, int] | None = None,
+    ) -> None:
+        """Atomic move + left-click via a single SendInput batch.
+        Optionally appends a final MOVE back to ``restore_position``
+        so the cursor visits the target only briefly. Releases any
+        currently-held mouse button first."""
+        _release_held_mouse_buttons()
+        dx, dy = _to_absolute_xy(x, y)
+        events = [
+            _mouse_input(
+                _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE | _MOUSEEVENTF_VIRTUALDESK,
+                dx, dy,
+            ),
+            _mouse_input(_MOUSEEVENTF_LEFTDOWN),
+            _mouse_input(_MOUSEEVENTF_LEFTUP),
+        ]
+        if restore_position is not None:
+            rdx, rdy = _to_absolute_xy(*restore_position)
+            events.append(
+                _mouse_input(
+                    _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE | _MOUSEEVENTF_VIRTUALDESK,
+                    rdx, rdy,
+                )
+            )
+        _send_inputs(events)
+else:
+    # Cross-platform stubs so tests / dev on macOS or Linux still work.
+    def _release_held_mouse_buttons():  # type: ignore[no-redef]
+        return (False, False, False)
+
+    def _click_at_target(x, y, restore_position=None):  # type: ignore[no-redef]
+        pyautogui.moveTo(int(x), int(y), duration=0)
+        pyautogui.click()
+        if restore_position is not None:
+            pyautogui.moveTo(int(restore_position[0]), int(restore_position[1]), duration=0)
+
 WORD_PRE_DELAY_SEC = 0.30
 WORD_RETRY_DELAY_SEC = 0.30
 WORD_POST_DELAY_SEC = 0.30
@@ -85,16 +270,21 @@ def do_action(mode: str, click_target: tuple[int, int], text_before_enter: str |
     _pin_thread_v2_dpi()
     x, y = click_target
     old = pyautogui.position()
-    pyautogui.moveTo(x, y, duration=0)
-    pyautogui.click()
+    # SendInput batch: release-held + move + click + restore in one
+    # atomic kernel hop. See the long comment by the SendInput
+    # primitives for why pyautogui's moveTo+click pair couldn't
+    # survive concurrent physical mouse activity.
+    _click_at_target(x, y, restore_position=(old.x, old.y) if mode != MODE_CLICK_ENTER else None)
 
     if mode == MODE_CLICK_ENTER:
         if text_before_enter:
             type_word_with_retry(text_before_enter)
             time.sleep(ENTER_AFTER_WORD_DELAY_SEC)
         pyautogui.press("enter")
-
-    pyautogui.moveTo(old.x, old.y, duration=0)
+        # Restore cursor AFTER the keystrokes — text input doesn't
+        # depend on cursor position and restoring earlier could
+        # confuse focus on some apps.
+        pyautogui.moveTo(old.x, old.y, duration=0)
 
 
 # ---- bridge primitives ---------------------------------------------------
@@ -108,8 +298,7 @@ def click_point(point: tuple[int, int]) -> None:
     """
     _pin_thread_v2_dpi()
     x, y = int(point[0]), int(point[1])
-    pyautogui.moveTo(x, y, duration=0)
-    pyautogui.click()
+    _click_at_target(x, y)
 
 
 def focus_and_press_arrow(
@@ -138,10 +327,12 @@ def focus_and_press_arrow(
     key = "down" if direction == "down" else "up"
     _pin_thread_v2_dpi()
     x, y = int(point[0]), int(point[1])
-    pyautogui.moveTo(x, y, duration=0)
-    pyautogui.click()
+    # Two distinct clicks with a 0.5s gap (see docstring). Each one
+    # goes through the atomic-batch primitive so a user mid-mouse-
+    # move can't divert either click off-target.
+    _click_at_target(x, y)
     time.sleep(0.5)
-    pyautogui.click()
+    _click_at_target(x, y)
     time.sleep(0.1)
     for _ in range(max(0, int(presses))):
         pyautogui.press(key)
