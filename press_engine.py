@@ -508,9 +508,19 @@ def execute_matches(
     delay_seconds: float = ACTION_SETTLE_DELAY_SEC,
     refocus_after_click: bool = False,
 ) -> None:
+    # If multiple matches fire in one tick, the user only wants ONE
+    # refocus click at the very end — not one per match. Per-match
+    # refocus would click at the restored origin three times for
+    # three buttons, which both wastes events and risks repeatedly
+    # punching focus into a window that's now in a different state.
+    last_idx = len(matches) - 1
     for idx, match in enumerate(matches):
-        execute_match(match, refocus_after_click=refocus_after_click)
-        if idx < len(matches) - 1 and delay_seconds > 0:
+        is_last = idx == last_idx
+        execute_match(
+            match,
+            refocus_after_click=refocus_after_click and is_last,
+        )
+        if not is_last and delay_seconds > 0:
             time.sleep(delay_seconds)
 
 

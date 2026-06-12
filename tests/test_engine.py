@@ -276,3 +276,48 @@ def test_execute_matches_waits_between_actions(monkeypatch):
         ("sleep", 0.2),
         ("exec", (30, 30)),
     ]
+
+
+def test_execute_matches_only_refocuses_on_last_match(monkeypatch):
+    """Regression: refocus_after_click must fire ONCE at the end of
+    the match sequence, not on every match. A user with three
+    Yes-buttons cleared in one tick should see one final refocus
+    click on their typing window, not three."""
+    refocus_flags: list = []
+
+    def spy_execute_match(match, refocus_after_click=False):
+        refocus_flags.append(refocus_after_click)
+
+    monkeypatch.setattr(press_engine, "execute_match", spy_execute_match)
+    monkeypatch.setattr(press_engine.time, "sleep", lambda _: None)
+
+    press_engine.execute_matches(
+        [
+            {"center": (10, 10)},
+            {"center": (20, 20)},
+            {"center": (30, 30)},
+        ],
+        delay_seconds=0.0,
+        refocus_after_click=True,
+    )
+
+    # Only the final iteration receives True.
+    assert refocus_flags == [False, False, True]
+
+
+def test_execute_matches_refocus_off_passes_false_throughout(monkeypatch):
+    """With the toggle off, no match should receive refocus=True
+    regardless of position in the sequence."""
+    refocus_flags: list = []
+    monkeypatch.setattr(
+        press_engine,
+        "execute_match",
+        lambda match, refocus_after_click=False: refocus_flags.append(refocus_after_click),
+    )
+    monkeypatch.setattr(press_engine.time, "sleep", lambda _: None)
+
+    press_engine.execute_matches(
+        [{"center": (10, 10)}, {"center": (20, 20)}],
+        refocus_after_click=False,
+    )
+    assert refocus_flags == [False, False]
