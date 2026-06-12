@@ -71,6 +71,12 @@ if sys.platform.startswith("win"):
     _VK_LBUTTON = 0x01
     _VK_RBUTTON = 0x02
     _VK_MBUTTON = 0x04
+    _VK_TAB = 0x09
+    _VK_MENU = 0x12     # Alt
+    _VK_CONTROL = 0x11  # Ctrl
+
+    _INPUT_KEYBOARD = 1
+    _KEYEVENTF_KEYUP = 0x0002
 
     _SM_XVIRTUALSCREEN = 76
     _SM_YVIRTUALSCREEN = 77
@@ -92,8 +98,20 @@ if sys.platform.startswith("win"):
             ("dwExtraInfo", _ULONG_PTR),
         ]
 
+    class _KEYBDINPUT(_ctypes.Structure):
+        _fields_ = [
+            ("wVk", _wintypes.WORD),
+            ("wScan", _wintypes.WORD),
+            ("dwFlags", _wintypes.DWORD),
+            ("time", _wintypes.DWORD),
+            ("dwExtraInfo", _ULONG_PTR),
+        ]
+
     class _INPUT_UNION(_ctypes.Union):
-        _fields_ = [("mi", _MOUSEINPUT)]
+        # Union of every input variant so a single SendInput batch
+        # can mix MOUSE and KEYBOARD events (refocus needs both:
+        # restore-cursor mouse-move followed by Ctrl+Tab keystrokes).
+        _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT)]
 
     class _INPUT(_ctypes.Structure):
         _anonymous_ = ("u",)
@@ -120,6 +138,33 @@ if sys.platform.startswith("win"):
         ev.type = _INPUT_MOUSE
         ev.mi = _MOUSEINPUT(dx, dy, 0, flags, 0, None)
         return ev
+
+    def _key_input(vk: int, key_up: bool = False) -> _INPUT:
+        ev = _INPUT()
+        ev.type = _INPUT_KEYBOARD
+        flags = _KEYEVENTF_KEYUP if key_up else 0
+        ev.ki = _KEYBDINPUT(vk, 0, flags, 0, None)
+        return ev
+
+    def _refocus_events(refocus_mode: str | None) -> list:
+        """Build the SendInput tail that re-routes focus back to
+        whatever the user was working in. Returns an empty list
+        when ``refocus_mode`` is "off" / unknown — callers append
+        the result to the main batch unconditionally."""
+        if refocus_mode == "click":
+            return [
+                _mouse_input(_MOUSEEVENTF_LEFTDOWN),
+                _mouse_input(_MOUSEEVENTF_LEFTUP),
+            ]
+        if refocus_mode in ("ctrl_tab", "alt_tab"):
+            mod = _VK_CONTROL if refocus_mode == "ctrl_tab" else _VK_MENU
+            return [
+                _key_input(mod),
+                _key_input(_VK_TAB),
+                _key_input(_VK_TAB, key_up=True),
+                _key_input(mod, key_up=True),
+            ]
+        return []
 
     def _send_inputs(events: list) -> None:
         if not events:
@@ -177,17 +222,19 @@ if sys.platform.startswith("win"):
         x: int,
         y: int,
         restore_position: tuple[int, int] | None = None,
-        refocus_after_restore: bool = False,
+        refocus_mode: str | None = None,
     ) -> None:
         """Atomic move + left-click via a single SendInput batch.
         Optionally appends a final MOVE back to ``restore_position``
         so the cursor visits the target only briefly. Releases any
         currently-held mouse button first.
 
-        ``refocus_after_restore`` (only meaningful when
-        ``restore_position`` is set) appends one extra LEFTDOWN +
-        LEFTUP at the restored origin so the user's typing window
-        re-takes focus. Experimental — see config.refocus_after_click.
+        ``refocus_mode`` (only meaningful when ``restore_position``
+        is set): "off" / None = nothing extra; "click" = extra left
+        click at restored origin (re-focuses by clicking); "ctrl_tab"
+        or "alt_tab" = synthesise the keystroke at the restored
+        position to re-focus WITHOUT clicking, so a text input's
+        caret stays put. All events ride the same SendInput batch.
         """
         _release_held_mouse_buttons()
         dx, dy = _to_absolute_xy(x, y)
@@ -207,22 +254,51 @@ if sys.platform.startswith("win"):
                     rdx, rdy,
                 )
             )
-            if refocus_after_restore:
-                events.append(_mouse_input(_MOUSEEVENTF_LEFTDOWN))
-                events.append(_mouse_input(_MOUSEEVENTF_LEFTUP))
+            events.extend(_refocus_events(refocus_mode))
+        _send_inputs(events)
+
+    def _restore_with_refocus(
+        origin: tuple[int, int],
+        refocus_mode: str | None,
+    ) -> None:
+        """Move cursor back to ``origin`` and (optionally) fire the
+        refocus event sequence — all in one SendInput call. Used by
+        do_action's MODE_CLICK_ENTER path where the click + typing
+        happens first and the restore-and-refocus runs after the
+        Enter keystroke (the click and the restore can't share a
+        batch because the typing has to land between them)."""
+        rdx, rdy = _to_absolute_xy(*origin)
+        events = [
+            _mouse_input(
+                _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE | _MOUSEEVENTF_VIRTUALDESK,
+                rdx, rdy,
+            )
+        ]
+        events.extend(_refocus_events(refocus_mode))
         _send_inputs(events)
 else:
     # Cross-platform stubs so tests / dev on macOS or Linux still work.
     def _release_held_mouse_buttons():  # type: ignore[no-redef]
         return (False, False, False)
 
-    def _click_at_target(x, y, restore_position=None, refocus_after_restore=False):  # type: ignore[no-redef]
+    def _click_at_target(x, y, restore_position=None, refocus_mode=None):  # type: ignore[no-redef]
         pyautogui.moveTo(int(x), int(y), duration=0)
         pyautogui.click()
         if restore_position is not None:
             pyautogui.moveTo(int(restore_position[0]), int(restore_position[1]), duration=0)
-            if refocus_after_restore:
+            if refocus_mode == "click":
                 pyautogui.click()
+            elif refocus_mode in ("ctrl_tab", "alt_tab"):
+                mod = "ctrl" if refocus_mode == "ctrl_tab" else "alt"
+                pyautogui.hotkey(mod, "tab")
+
+    def _restore_with_refocus(origin, refocus_mode):  # type: ignore[no-redef]
+        pyautogui.moveTo(int(origin[0]), int(origin[1]), duration=0)
+        if refocus_mode == "click":
+            pyautogui.click()
+        elif refocus_mode in ("ctrl_tab", "alt_tab"):
+            mod = "ctrl" if refocus_mode == "ctrl_tab" else "alt"
+            pyautogui.hotkey(mod, "tab")
 
 WORD_PRE_DELAY_SEC = 0.30
 WORD_RETRY_DELAY_SEC = 0.30
@@ -282,49 +358,49 @@ def do_action(
     mode: str,
     click_target: tuple[int, int],
     text_before_enter: str | None = None,
-    refocus_after_click: bool = False,
+    refocus_mode: str | None = None,
 ) -> None:
     """Rules-engine click action.
 
-    ``refocus_after_click`` (experimental): after the cursor is
-    restored to its original position, fire one extra left click
-    there. Use case: the user is typing into a window, a rule
-    triggers, the rule's click steals focus from the user's window
-    onto its target — the restored cursor lands back in the user's
-    window but they still need a click to re-focus. This flag does
-    that click for them so they don't have to lift their hand off
-    the keyboard. Off by default.
+    ``refocus_mode`` (experimental): after the rule's click and
+    cursor restore, fire one extra event to put focus back on the
+    user's typing window.
+      - None / "off": no extra event.
+      - "click"     : extra LEFTDOWN+LEFTUP at the restored origin.
+                      Re-focuses by clicking; can move the caret
+                      inside text inputs.
+      - "ctrl_tab"  : synthesise Ctrl+Tab. Caret stays put — useful
+                      for tabbed apps (browsers, IDEs).
+      - "alt_tab"   : synthesise Alt+Tab. Switches to the previous
+                      top-level window — useful when the user's
+                      typing happens in a different application.
     """
     _pin_thread_v2_dpi()
     x, y = click_target
     old = pyautogui.position()
     # SendInput batch: release-held + move + click + restore (and
-    # optional refocus-click) in one atomic kernel hop. See the long
+    # optional refocus event) in one atomic kernel hop. See the long
     # comment by the SendInput primitives for why pyautogui's
     # moveTo+click pair couldn't survive concurrent physical mouse
     # activity.
     if mode == MODE_CLICK_ENTER:
         # No restore yet — text input wants focus on the target's
         # window. Restore + optional refocus happen after the keys
-        # have been pressed.
+        # have been pressed (second SendInput batch).
         _click_at_target(x, y)
         if text_before_enter:
             type_word_with_retry(text_before_enter)
             time.sleep(ENTER_AFTER_WORD_DELAY_SEC)
         pyautogui.press("enter")
-        if refocus_after_click:
-            # _click_at_target itself moves + clicks, which is
-            # exactly what we want here: cursor moves back to
-            # `old` AND clicks once at that position to re-focus
-            # the user's window.
-            _click_at_target(old.x, old.y)
+        if refocus_mode and refocus_mode != "off":
+            _restore_with_refocus((old.x, old.y), refocus_mode)
         else:
             pyautogui.moveTo(old.x, old.y, duration=0)
     else:
         _click_at_target(
             x, y,
             restore_position=(old.x, old.y),
-            refocus_after_restore=refocus_after_click,
+            refocus_mode=refocus_mode,
         )
 
 

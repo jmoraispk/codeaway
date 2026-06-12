@@ -626,7 +626,7 @@ class EngineWorker(QObject):
                         if actions:
                             execute_matches(
                                 actions,
-                                refocus_after_click=bool(cfg.get("refocus_after_click", False)),
+                                refocus_mode=cfg.get("refocus_mode") or "off",
                             )
                             for action in actions:
                                 center = action.get("center")
@@ -1218,26 +1218,47 @@ class MainWindow(QMainWindow):
         lay.addWidget(_VLine())
 
         # Experimental: after a rule click and cursor restore, fire
-        # one extra click at the restored cursor position so the
-        # user's typing window re-takes focus. Toggle here so it's
-        # easy to A/B while we feel out the behaviour; persists to
-        # config so the choice survives restarts.
-        self._refocus_checkbox = CheckBox("Refocus")
-        self._refocus_checkbox.setToolTip(
-            "After an auto-click, fire one extra click at the cursor's "
-            "original position to re-focus the window the user was "
-            "typing in. Experimental — leave off if it causes any "
-            "unintended interactions."
+        # one extra event to put focus back on the user's typing
+        # window. "Click" = extra mouse click at the restored origin
+        # (can move the text caret); "Ctrl+Tab" / "Alt+Tab" =
+        # keyboard switch (caret stays put). Persists across
+        # restarts; worker re-reads on every tick so a change
+        # applies immediately.
+        lay.addWidget(CaptionLabel("Refocus"))
+        self._refocus_combo = ComboBox()
+        # display label → stored mode value
+        self._refocus_options = [
+            ("Off", "off"),
+            ("Click", "click"),
+            ("Ctrl+Tab", "ctrl_tab"),
+            ("Alt+Tab", "alt_tab"),
+        ]
+        current_mode = self._cfg.get("refocus_mode") or "off"
+        for label, mode in self._refocus_options:
+            self._refocus_combo.addItem(label, userData=mode)
+        # Select the persisted mode (default to "Off" if the stored
+        # value is unknown).
+        for i, (_label, mode) in enumerate(self._refocus_options):
+            if mode == current_mode:
+                self._refocus_combo.setCurrentIndex(i)
+                break
+        self._refocus_combo.setToolTip(
+            "After an auto-click, what should we do to re-focus the "
+            "window you were typing in?\n"
+            "• Off — nothing (cursor just snaps back).\n"
+            "• Click — extra left click at the original cursor "
+            "position. Caveat: lands on a new caret position if you "
+            "were typing in a text input.\n"
+            "• Ctrl+Tab — keyboard switch. Caret stays put; works "
+            "for tabbed apps (browser, IDE, Cursor).\n"
+            "• Alt+Tab — keyboard switch to the previous top-level "
+            "window. Use when your typing is in a different app."
         )
-        self._refocus_checkbox.setChecked(
-            bool(self._cfg.get("refocus_after_click", False))
+        self._refocus_combo.setFixedWidth(100)
+        self._refocus_combo.currentIndexChanged.connect(
+            self._on_refocus_mode_changed
         )
-        self._refocus_checkbox.stateChanged.connect(
-            lambda _state=0, cb=self._refocus_checkbox: self._on_refocus_toggled(
-                cb.isChecked()
-            )
-        )
-        lay.addWidget(self._refocus_checkbox)
+        lay.addWidget(self._refocus_combo)
 
         lay.addWidget(_VLine())
 
@@ -2822,7 +2843,7 @@ class MainWindow(QMainWindow):
                 # Same boolean drives the FastAPI service, so detection and
                 # service start/stop in lockstep.
                 "bridge_active": self._bridge is not None,
-                "refocus_after_click": bool(self._cfg.get("refocus_after_click", False)),
+                "refocus_mode": self._cfg.get("refocus_mode") or "off",
             }
 
     def _persist(self) -> None:
@@ -3718,14 +3739,17 @@ class MainWindow(QMainWindow):
 
     # ---------- run control ----------
 
-    def _on_refocus_toggled(self, enabled: bool) -> None:
-        """Persist the Refocus toggle. The worker reads the value
+    def _on_refocus_mode_changed(self, index: int) -> None:
+        """Persist the Refocus dropdown. The worker reads the value
         through _snapshot_cfg on every tick so the change takes
         effect on the next auto-click without restart."""
+        mode = self._refocus_combo.itemData(index)
+        if not isinstance(mode, str):
+            return
         with self._cfg_lock:
-            self._cfg["refocus_after_click"] = bool(enabled)
+            self._cfg["refocus_mode"] = mode
         self._persist()
-        self._log(f"[refocus] {'on' if enabled else 'off'}")
+        self._log(f"[refocus] {mode}")
 
     def _on_interval_changed(self, value: float) -> None:
         with self._cfg_lock:

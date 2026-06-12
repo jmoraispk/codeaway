@@ -225,8 +225,8 @@ def test_execute_match_uses_click_enter(monkeypatch):
     monkeypatch.setattr(
         press_engine,
         "do_action",
-        lambda mode, center, text_before_enter=None, refocus_after_click=False: called.update(
-            mode=mode, center=center, text=text_before_enter, refocus=refocus_after_click
+        lambda mode, center, text_before_enter=None, refocus_mode=None: called.update(
+            mode=mode, center=center, text=text_before_enter, refocus=refocus_mode
         ),
     )
 
@@ -242,7 +242,7 @@ def test_execute_match_uses_click_enter(monkeypatch):
         "mode": "click+enter",
         "center": (40, 50),
         "text": "continue",
-        "refocus": False,
+        "refocus": None,
     }
 
 
@@ -252,7 +252,7 @@ def test_execute_matches_waits_between_actions(monkeypatch):
     monkeypatch.setattr(
         press_engine,
         "execute_match",
-        lambda match, refocus_after_click=False: calls.append(("exec", match["center"])),
+        lambda match, refocus_mode=None: calls.append(("exec", match["center"])),
     )
     monkeypatch.setattr(
         press_engine.time,
@@ -279,14 +279,14 @@ def test_execute_matches_waits_between_actions(monkeypatch):
 
 
 def test_execute_matches_only_refocuses_on_last_match(monkeypatch):
-    """Regression: refocus_after_click must fire ONCE at the end of
-    the match sequence, not on every match. A user with three
-    Yes-buttons cleared in one tick should see one final refocus
-    click on their typing window, not three."""
-    refocus_flags: list = []
+    """Regression: refocus_mode must fire ONCE at the end of the
+    match sequence, not on every match. A user with three Yes-
+    buttons cleared in one tick should see one final refocus event
+    targeting their typing window, not three."""
+    seen_modes: list = []
 
-    def spy_execute_match(match, refocus_after_click=False):
-        refocus_flags.append(refocus_after_click)
+    def spy_execute_match(match, refocus_mode=None):
+        seen_modes.append(refocus_mode)
 
     monkeypatch.setattr(press_engine, "execute_match", spy_execute_match)
     monkeypatch.setattr(press_engine.time, "sleep", lambda _: None)
@@ -298,26 +298,48 @@ def test_execute_matches_only_refocuses_on_last_match(monkeypatch):
             {"center": (30, 30)},
         ],
         delay_seconds=0.0,
-        refocus_after_click=True,
+        refocus_mode="ctrl_tab",
     )
 
-    # Only the final iteration receives True.
-    assert refocus_flags == [False, False, True]
+    # Only the final iteration receives the active mode.
+    assert seen_modes == [None, None, "ctrl_tab"]
 
 
-def test_execute_matches_refocus_off_passes_false_throughout(monkeypatch):
-    """With the toggle off, no match should receive refocus=True
-    regardless of position in the sequence."""
-    refocus_flags: list = []
+def test_execute_matches_refocus_off_passes_none_throughout(monkeypatch):
+    """With the dropdown set to "off" / None, no match should
+    receive a non-None refocus_mode regardless of position."""
+    seen_modes: list = []
     monkeypatch.setattr(
         press_engine,
         "execute_match",
-        lambda match, refocus_after_click=False: refocus_flags.append(refocus_after_click),
+        lambda match, refocus_mode=None: seen_modes.append(refocus_mode),
     )
     monkeypatch.setattr(press_engine.time, "sleep", lambda _: None)
 
     press_engine.execute_matches(
         [{"center": (10, 10)}, {"center": (20, 20)}],
-        refocus_after_click=False,
+        refocus_mode=None,
     )
-    assert refocus_flags == [False, False]
+    assert seen_modes == [None, None]
+
+
+def test_legacy_refocus_after_click_bool_migrates_to_mode(tmp_path, monkeypatch):
+    """A config carrying the legacy ``refocus_after_click: True``
+    boolean (pre-enum era) must load as ``refocus_mode == "click"``
+    so existing users keep their refocus behaviour on upgrade."""
+    import press_store
+
+    monkeypatch.setattr(press_store, "TEMPLATES_DIR", tmp_path)
+    monkeypatch.setattr(press_store, "CONFIG_PATH", tmp_path / "config.json")
+    cfg = press_store.normalize_config({"refocus_after_click": True})
+    assert cfg["refocus_mode"] == "click"
+    assert "refocus_after_click" not in cfg  # legacy key dropped
+
+    cfg = press_store.normalize_config({"refocus_after_click": False})
+    assert cfg["refocus_mode"] == "off"
+
+    cfg = press_store.normalize_config({"refocus_mode": "ctrl_tab"})
+    assert cfg["refocus_mode"] == "ctrl_tab"
+
+    cfg = press_store.normalize_config({"refocus_mode": "garbage"})
+    assert cfg["refocus_mode"] == "off"  # invalid → safe default

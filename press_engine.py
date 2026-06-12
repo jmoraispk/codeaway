@@ -488,7 +488,7 @@ def evaluate_rules(
     return results, actions
 
 
-def execute_match(match: dict, refocus_after_click: bool = False) -> None:
+def execute_match(match: dict, refocus_mode: str | None = None) -> None:
     center = match.get("center")
     if center is None:
         return
@@ -497,28 +497,28 @@ def execute_match(match: dict, refocus_after_click: bool = False) -> None:
             MODE_CLICK_ENTER,
             center,
             text_before_enter=match.get("text") or "continue",
-            refocus_after_click=refocus_after_click,
+            refocus_mode=refocus_mode,
         )
     else:
-        do_action(MODE_CLICK, center, refocus_after_click=refocus_after_click)
+        do_action(MODE_CLICK, center, refocus_mode=refocus_mode)
 
 
 def execute_matches(
     matches: list[dict],
     delay_seconds: float = ACTION_SETTLE_DELAY_SEC,
-    refocus_after_click: bool = False,
+    refocus_mode: str | None = None,
 ) -> None:
     # If multiple matches fire in one tick, the user only wants ONE
-    # refocus click at the very end — not one per match. Per-match
-    # refocus would click at the restored origin three times for
-    # three buttons, which both wastes events and risks repeatedly
-    # punching focus into a window that's now in a different state.
+    # refocus event at the very end — not one per match. Per-match
+    # refocus would fire three times for three buttons, which both
+    # wastes events and risks repeatedly punching focus into a
+    # window that's now in a different state.
     last_idx = len(matches) - 1
     for idx, match in enumerate(matches):
         is_last = idx == last_idx
         execute_match(
             match,
-            refocus_after_click=refocus_after_click and is_last,
+            refocus_mode=refocus_mode if is_last else None,
         )
         if not is_last and delay_seconds > 0:
             time.sleep(delay_seconds)

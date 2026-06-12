@@ -156,14 +156,28 @@ def default_config() -> dict:
         "hotkey_mods": DEFAULT_HOTKEY_MODS,
         "rules": [],
         "bridge": default_bridge_config(),
-        # Experimental: after a rule click + cursor restore, fire one
-        # extra left-click at the restored origin. The idea is to
-        # punch focus back into whatever the user was typing into so
-        # they don't have to lift their hand off the keyboard to
-        # re-focus when an auto-click steals focus from their active
-        # window. Off by default — toggle in the command bar.
-        "refocus_after_click": False,
+        # Experimental: after a rule click + cursor restore, fire ONE
+        # extra event (only on the last match of a multi-match tick)
+        # to punch focus back into the user's typing window.
+        #   "off"      — no refocus
+        #   "click"    — extra left-click at the restored origin.
+        #                Works well except in text inputs, where the
+        #                click moves the caret and the user's next
+        #                keystrokes land in the wrong place.
+        #   "ctrl_tab" — synthesise Ctrl+Tab via SendInput.
+        #                Caret stays put; useful inside apps with
+        #                tabs (browsers, Cursor, IDEs).
+        #   "alt_tab"  — synthesise Alt+Tab. Switches to the
+        #                previous TOP-LEVEL window in the MRU order.
+        #                Use when the user's typing happens in a
+        #                different application than the rule target.
+        # All four ride the same atomic SendInput batch as the
+        # main click so no physical input can interleave.
+        "refocus_mode": "off",
     }
+
+
+REFOCUS_MODES = ("off", "click", "alt_tab", "ctrl_tab")
 
 
 def ensure_templates_dir() -> None:
@@ -507,7 +521,17 @@ def normalize_config(config: dict | None) -> dict:
             base["hotkey_vk"] = int(config["hotkey_vk"])
         if _valid_vk(config.get("hotkey_mods")):
             base["hotkey_mods"] = int(config["hotkey_mods"])
-        base["refocus_after_click"] = bool(config.get("refocus_after_click", False))
+        # refocus_mode: accept the new string value if valid;
+        # otherwise migrate the legacy ``refocus_after_click`` bool
+        # (True → "click", False → "off") so existing users keep
+        # their setting on upgrade.
+        raw_mode = config.get("refocus_mode")
+        if isinstance(raw_mode, str) and raw_mode in REFOCUS_MODES:
+            base["refocus_mode"] = raw_mode
+        elif config.get("refocus_after_click") is True:
+            base["refocus_mode"] = "click"
+        else:
+            base["refocus_mode"] = "off"
         raw_rules = config.get("rules")
         if isinstance(raw_rules, list):
             base["rules"] = [_normalize_rule(rule, idx + 1) for idx, rule in enumerate(raw_rules)]
