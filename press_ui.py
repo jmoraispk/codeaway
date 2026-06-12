@@ -624,7 +624,10 @@ class EngineWorker(QObject):
                         windows = (cfg.get("bridge") or {}).get("windows", []) or []
                         results, actions = evaluate_rules(runtime_rules, windows)
                         if actions:
-                            execute_matches(actions)
+                            execute_matches(
+                                actions,
+                                refocus_after_click=bool(cfg.get("refocus_after_click", False)),
+                            )
                             for action in actions:
                                 center = action.get("center")
                                 if center is None:
@@ -1211,6 +1214,30 @@ class MainWindow(QMainWindow):
         self._interval_spin.valueChanged.connect(self._on_interval_changed)
         lay.addWidget(self._interval_spin)
         lay.addWidget(CaptionLabel("s"))
+
+        lay.addWidget(_VLine())
+
+        # Experimental: after a rule click and cursor restore, fire
+        # one extra click at the restored cursor position so the
+        # user's typing window re-takes focus. Toggle here so it's
+        # easy to A/B while we feel out the behaviour; persists to
+        # config so the choice survives restarts.
+        self._refocus_checkbox = CheckBox("Refocus")
+        self._refocus_checkbox.setToolTip(
+            "After an auto-click, fire one extra click at the cursor's "
+            "original position to re-focus the window the user was "
+            "typing in. Experimental — leave off if it causes any "
+            "unintended interactions."
+        )
+        self._refocus_checkbox.setChecked(
+            bool(self._cfg.get("refocus_after_click", False))
+        )
+        self._refocus_checkbox.stateChanged.connect(
+            lambda _state=0, cb=self._refocus_checkbox: self._on_refocus_toggled(
+                cb.isChecked()
+            )
+        )
+        lay.addWidget(self._refocus_checkbox)
 
         lay.addWidget(_VLine())
 
@@ -2795,6 +2822,7 @@ class MainWindow(QMainWindow):
                 # Same boolean drives the FastAPI service, so detection and
                 # service start/stop in lockstep.
                 "bridge_active": self._bridge is not None,
+                "refocus_after_click": bool(self._cfg.get("refocus_after_click", False)),
             }
 
     def _persist(self) -> None:
@@ -3689,6 +3717,15 @@ class MainWindow(QMainWindow):
             self._log(f"[error] test failed: {exc}")
 
     # ---------- run control ----------
+
+    def _on_refocus_toggled(self, enabled: bool) -> None:
+        """Persist the Refocus toggle. The worker reads the value
+        through _snapshot_cfg on every tick so the change takes
+        effect on the next auto-click without restart."""
+        with self._cfg_lock:
+            self._cfg["refocus_after_click"] = bool(enabled)
+        self._persist()
+        self._log(f"[refocus] {'on' if enabled else 'off'}")
 
     def _on_interval_changed(self, value: float) -> None:
         with self._cfg_lock:

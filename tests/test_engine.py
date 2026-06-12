@@ -225,8 +225,8 @@ def test_execute_match_uses_click_enter(monkeypatch):
     monkeypatch.setattr(
         press_engine,
         "do_action",
-        lambda mode, center, text_before_enter=None: called.update(
-            mode=mode, center=center, text=text_before_enter
+        lambda mode, center, text_before_enter=None, refocus_after_click=False: called.update(
+            mode=mode, center=center, text=text_before_enter, refocus=refocus_after_click
         ),
     )
 
@@ -242,6 +242,7 @@ def test_execute_match_uses_click_enter(monkeypatch):
         "mode": "click+enter",
         "center": (40, 50),
         "text": "continue",
+        "refocus": False,
     }
 
 
@@ -251,7 +252,7 @@ def test_execute_matches_waits_between_actions(monkeypatch):
     monkeypatch.setattr(
         press_engine,
         "execute_match",
-        lambda match: calls.append(("exec", match["center"])),
+        lambda match, refocus_after_click=False: calls.append(("exec", match["center"])),
     )
     monkeypatch.setattr(
         press_engine.time,

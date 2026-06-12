@@ -177,11 +177,18 @@ if sys.platform.startswith("win"):
         x: int,
         y: int,
         restore_position: tuple[int, int] | None = None,
+        refocus_after_restore: bool = False,
     ) -> None:
         """Atomic move + left-click via a single SendInput batch.
         Optionally appends a final MOVE back to ``restore_position``
         so the cursor visits the target only briefly. Releases any
-        currently-held mouse button first."""
+        currently-held mouse button first.
+
+        ``refocus_after_restore`` (only meaningful when
+        ``restore_position`` is set) appends one extra LEFTDOWN +
+        LEFTUP at the restored origin so the user's typing window
+        re-takes focus. Experimental — see config.refocus_after_click.
+        """
         _release_held_mouse_buttons()
         dx, dy = _to_absolute_xy(x, y)
         events = [
@@ -200,17 +207,22 @@ if sys.platform.startswith("win"):
                     rdx, rdy,
                 )
             )
+            if refocus_after_restore:
+                events.append(_mouse_input(_MOUSEEVENTF_LEFTDOWN))
+                events.append(_mouse_input(_MOUSEEVENTF_LEFTUP))
         _send_inputs(events)
 else:
     # Cross-platform stubs so tests / dev on macOS or Linux still work.
     def _release_held_mouse_buttons():  # type: ignore[no-redef]
         return (False, False, False)
 
-    def _click_at_target(x, y, restore_position=None):  # type: ignore[no-redef]
+    def _click_at_target(x, y, restore_position=None, refocus_after_restore=False):  # type: ignore[no-redef]
         pyautogui.moveTo(int(x), int(y), duration=0)
         pyautogui.click()
         if restore_position is not None:
             pyautogui.moveTo(int(restore_position[0]), int(restore_position[1]), duration=0)
+            if refocus_after_restore:
+                pyautogui.click()
 
 WORD_PRE_DELAY_SEC = 0.30
 WORD_RETRY_DELAY_SEC = 0.30
@@ -266,25 +278,54 @@ def type_word_with_retry(word: str) -> None:
     time.sleep(WORD_POST_DELAY_SEC)
 
 
-def do_action(mode: str, click_target: tuple[int, int], text_before_enter: str | None = None) -> None:
+def do_action(
+    mode: str,
+    click_target: tuple[int, int],
+    text_before_enter: str | None = None,
+    refocus_after_click: bool = False,
+) -> None:
+    """Rules-engine click action.
+
+    ``refocus_after_click`` (experimental): after the cursor is
+    restored to its original position, fire one extra left click
+    there. Use case: the user is typing into a window, a rule
+    triggers, the rule's click steals focus from the user's window
+    onto its target — the restored cursor lands back in the user's
+    window but they still need a click to re-focus. This flag does
+    that click for them so they don't have to lift their hand off
+    the keyboard. Off by default.
+    """
     _pin_thread_v2_dpi()
     x, y = click_target
     old = pyautogui.position()
-    # SendInput batch: release-held + move + click + restore in one
-    # atomic kernel hop. See the long comment by the SendInput
-    # primitives for why pyautogui's moveTo+click pair couldn't
-    # survive concurrent physical mouse activity.
-    _click_at_target(x, y, restore_position=(old.x, old.y) if mode != MODE_CLICK_ENTER else None)
-
+    # SendInput batch: release-held + move + click + restore (and
+    # optional refocus-click) in one atomic kernel hop. See the long
+    # comment by the SendInput primitives for why pyautogui's
+    # moveTo+click pair couldn't survive concurrent physical mouse
+    # activity.
     if mode == MODE_CLICK_ENTER:
+        # No restore yet — text input wants focus on the target's
+        # window. Restore + optional refocus happen after the keys
+        # have been pressed.
+        _click_at_target(x, y)
         if text_before_enter:
             type_word_with_retry(text_before_enter)
             time.sleep(ENTER_AFTER_WORD_DELAY_SEC)
         pyautogui.press("enter")
-        # Restore cursor AFTER the keystrokes — text input doesn't
-        # depend on cursor position and restoring earlier could
-        # confuse focus on some apps.
-        pyautogui.moveTo(old.x, old.y, duration=0)
+        if refocus_after_click:
+            # _click_at_target itself moves + clicks, which is
+            # exactly what we want here: cursor moves back to
+            # `old` AND clicks once at that position to re-focus
+            # the user's window.
+            _click_at_target(old.x, old.y)
+        else:
+            pyautogui.moveTo(old.x, old.y, duration=0)
+    else:
+        _click_at_target(
+            x, y,
+            restore_position=(old.x, old.y),
+            refocus_after_restore=refocus_after_click,
+        )
 
 
 # ---- bridge primitives ---------------------------------------------------

@@ -156,6 +156,13 @@ def default_config() -> dict:
         "hotkey_mods": DEFAULT_HOTKEY_MODS,
         "rules": [],
         "bridge": default_bridge_config(),
+        # Experimental: after a rule click + cursor restore, fire one
+        # extra left-click at the restored origin. The idea is to
+        # punch focus back into whatever the user was typing into so
+        # they don't have to lift their hand off the keyboard to
+        # re-focus when an auto-click steals focus from their active
+        # window. Off by default — toggle in the command bar.
+        "refocus_after_click": False,
     }
 
 
@@ -500,6 +507,7 @@ def normalize_config(config: dict | None) -> dict:
             base["hotkey_vk"] = int(config["hotkey_vk"])
         if _valid_vk(config.get("hotkey_mods")):
             base["hotkey_mods"] = int(config["hotkey_mods"])
+        base["refocus_after_click"] = bool(config.get("refocus_after_click", False))
         raw_rules = config.get("rules")
         if isinstance(raw_rules, list):
             base["rules"] = [_normalize_rule(rule, idx + 1) for idx, rule in enumerate(raw_rules)]

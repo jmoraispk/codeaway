@@ -488,19 +488,28 @@ def evaluate_rules(
     return results, actions
 
 
-def execute_match(match: dict) -> None:
+def execute_match(match: dict, refocus_after_click: bool = False) -> None:
     center = match.get("center")
     if center is None:
         return
     if match.get("action") == ACTION_CLICK_TYPE_ENTER:
-        do_action(MODE_CLICK_ENTER, center, text_before_enter=match.get("text") or "continue")
+        do_action(
+            MODE_CLICK_ENTER,
+            center,
+            text_before_enter=match.get("text") or "continue",
+            refocus_after_click=refocus_after_click,
+        )
     else:
-        do_action(MODE_CLICK, center)
+        do_action(MODE_CLICK, center, refocus_after_click=refocus_after_click)
 
 
-def execute_matches(matches: list[dict], delay_seconds: float = ACTION_SETTLE_DELAY_SEC) -> None:
+def execute_matches(
+    matches: list[dict],
+    delay_seconds: float = ACTION_SETTLE_DELAY_SEC,
+    refocus_after_click: bool = False,
+) -> None:
     for idx, match in enumerate(matches):
-        execute_match(match)
+        execute_match(match, refocus_after_click=refocus_after_click)
         if idx < len(matches) - 1 and delay_seconds > 0:
             time.sleep(delay_seconds)
 
