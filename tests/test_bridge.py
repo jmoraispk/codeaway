@@ -1108,6 +1108,31 @@ def test_short_label_keeps_only_part_before_first_separator():
     assert _short_label("") == "Cursor"
 
 
+def test_codex_signature_uses_package_path_not_chatgpt_title():
+    from press_windows import _is_codex_process_path
+
+    assert _is_codex_process_path(
+        r"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.825.5331.0_x64__id\\app\\ChatGPT.exe"
+    )
+    assert not _is_codex_process_path(
+        r"C:\\Program Files\\WindowsApps\\OpenAI.ChatGPT_1.0_x64\\app\\ChatGPT.exe"
+    )
+
+
+def test_list_bridge_windows_deduplicates_hwnds(monkeypatch):
+    import press_windows
+
+    monkeypatch.setattr(press_windows, "list_cursor_windows", lambda current_workspace_only=True: [
+        {"hwnd": 7, "region": [0, 0, 500, 500], "backend": "cursor"}
+    ])
+    monkeypatch.setattr(press_windows, "list_codex_windows", lambda current_workspace_only=True: [
+        {"hwnd": 7, "region": [0, 0, 500, 500], "backend": "codex_desktop"},
+        {"hwnd": 8, "region": [500, 0, 500, 500], "backend": "codex_desktop"},
+    ])
+
+    assert [window["hwnd"] for window in press_windows.list_bridge_windows()] == [7, 8]
+
+
 # ---- Workspace binding ----------------------------------------------------
 
 def test_workspace_switch_endpoint_400_for_bad_direction(fastapi_client):

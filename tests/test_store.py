@@ -393,6 +393,31 @@ def test_normalize_window_round_trips_hwnd():
     assert cfg["bridge"]["windows"][0]["hwnd"] == 4242
 
 
+def test_normalize_window_round_trips_backend():
+    cfg = press_store.normalize_config(
+        {"bridge": {"windows": [{"backend": "codex_desktop"}]}}
+    )
+    assert cfg["bridge"]["windows"][0]["backend"] == "codex_desktop"
+
+
+def test_merge_detected_windows_copies_backend():
+    result = press_store.merge_detected_windows([], [{
+        "hwnd": 9,
+        "name": "Codex",
+        "region": [0, 0, 500, 500],
+        "backend": "codex_desktop",
+    }])
+    assert result[0]["backend"] == "codex_desktop"
+
+
+def test_merge_detected_windows_refreshes_backend_for_known_hwnd():
+    result = press_store.merge_detected_windows(
+        [{"hwnd": 9, "name": "Cursor", "region": [0, 0, 500, 500], "backend": "cursor"}],
+        [{"hwnd": 9, "name": "Codex", "region": [0, 0, 500, 500], "backend": "codex_desktop"}],
+    )
+    assert result[0]["backend"] == "codex_desktop"
+
+
 def test_legacy_config_with_setups_drops_to_active_setup_windows():
     """A pre-simplification config carrying setups + active_setup_id
     loads cleanly: setups + active_setup_id are silently dropped,

@@ -77,6 +77,7 @@ def default_bridge_window(name: str = "Cursor") -> dict:
     return {
         "id": uuid.uuid4().hex[:8],
         "hwnd": None,
+        "backend": "cursor",
         "name": name,
         "region": None,
         "chat_target": None,
@@ -229,6 +230,10 @@ def _valid_point(value) -> bool:
     return True
 
 
+def _normalize_backend(value) -> str:
+    return value.strip() if isinstance(value, str) and value.strip() else "cursor"
+
+
 def _normalize_rule(rule: dict, priority: int) -> dict:
     base = default_rule()
     if isinstance(rule, dict):
@@ -296,6 +301,7 @@ def _normalize_window(window: dict | None) -> dict:
         base["id"] = uuid.uuid4().hex[:8]
     if not isinstance(base.get("name"), str) or not base["name"].strip():
         base["name"] = "Cursor"
+    base["backend"] = _normalize_backend(base.get("backend"))
     if not _valid_region(base.get("region")):
         base["region"] = None
     if _valid_point(base.get("chat_target")) and base.get("chat_target") is not None:
@@ -1092,6 +1098,7 @@ def merge_detected_windows(
             updated = dict(prior)
             updated["hwnd"] = h_int
             updated["region"] = [int(v) for v in region]
+            updated["backend"] = _normalize_backend(d.get("backend"))
             # Re-derive name when the stored value still carries a
             # " - " separator: that's the signature of a stale
             # auto-derived title from an older trim (or a fresh
@@ -1106,5 +1113,6 @@ def merge_detected_windows(
             entry = default_bridge_window(d.get("name", "Cursor"))
             entry["hwnd"] = h_int
             entry["region"] = [int(v) for v in region]
+            entry["backend"] = _normalize_backend(d.get("backend"))
             out.append(entry)
     return out

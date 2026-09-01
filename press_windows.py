@@ -53,8 +53,32 @@ def _short_label(title: str) -> str:
     return head or "Cursor"
 
 
-def list_cursor_windows(current_workspace_only: bool = True) -> list[dict]:
-    """Enumerate visible Cursor windows.
+def _window_process_path(user32, kernel32, hwnd) -> str:
+    """Return an HWND's executable path, or an empty string on failure."""
+    try:
+        process_id = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        if not process_id.value:
+            return ""
+        process = kernel32.OpenProcess(0x1000, False, process_id.value)
+        if not process:
+            return ""
+        try:
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buffer))
+            if kernel32.QueryFullProcessImageNameW(
+                process, 0, buffer, ctypes.byref(size)
+            ):
+                return buffer.value
+        finally:
+            kernel32.CloseHandle(process)
+    except Exception:
+        pass
+    return ""
+
+
+def _list_visible_windows(current_workspace_only: bool = True) -> list[dict]:
+    """Enumerate visible, usable top-level windows with process paths.
 
     Each entry:
         {
@@ -64,12 +88,12 @@ def list_cursor_windows(current_workspace_only: bool = True) -> list[dict]:
           "hwnd": <Win32 handle, int>
         }
 
-    Filters out hidden windows, minimised windows, ones with no
-    "Cursor" substring in the title, and ones with degenerate (<200 px)
-    width or height. Returns [] on non-Windows platforms.
+    Filters out hidden windows, minimised windows, ones without a title,
+    and ones with degenerate (<200 px) width or height. Returns [] on
+    non-Windows platforms.
 
     ``current_workspace_only`` (default True) restricts the result to
-    Cursor windows on the foreground virtual desktop via
+    windows on the foreground virtual desktop via
     IVirtualDesktopManager. Pass False to see windows on every
     desktop — used by the rule's window-scope picker so the user
     can select windows that aren't currently in view but will be
@@ -80,6 +104,7 @@ def list_cursor_windows(current_workspace_only: bool = True) -> list[dict]:
 
     _pin_thread_v2_dpi()
     user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
     out: list[dict] = []
 
     WNDENUMPROC = ctypes.WINFUNCTYPE(
@@ -102,8 +127,6 @@ def list_cursor_windows(current_workspace_only: bool = True) -> list[dict]:
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
             title = buf.value
-            if "Cursor" not in title:
-                return True
             rect = wintypes.RECT()
             if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
                 return True
@@ -117,6 +140,7 @@ def list_cursor_windows(current_workspace_only: bool = True) -> list[dict]:
                     "name": _short_label(title),
                     "region": [int(rect.left), int(rect.top), int(w), int(h)],
                     "hwnd": int(hwnd),
+                    "process_path": _window_process_path(user32, kernel32, hwnd),
                 }
             )
         except Exception:
@@ -153,3 +177,37 @@ def list_cursor_windows(current_workspace_only: bool = True) -> list[dict]:
     # names line up with what they see.
     out.sort(key=lambda w: (w["region"][0], w["region"][1]))
     return out
+
+
+def list_cursor_windows(current_workspace_only: bool = True) -> list[dict]:
+    """Enumerate visible Cursor windows, preserving legacy title matching."""
+    return [
+        {**candidate, "backend": "cursor"}
+        for candidate in _list_visible_windows(current_workspace_only)
+        if "Cursor" in candidate["title"]
+    ]
+
+
+def _is_codex_process_path(process_path):
+    normalized = (process_path or "").replace("/", "\\").lower()
+    return "openai.codex_" in normalized or "\\openai\\codex\\" in normalized
+
+
+def list_codex_windows(current_workspace_only: bool = True) -> list[dict]:
+    return [
+        {**candidate, "name": "Codex", "backend": "codex_desktop"}
+        for candidate in _list_visible_windows(current_workspace_only)
+        if _is_codex_process_path(candidate.get("process_path"))
+    ]
+
+
+def list_bridge_windows(current_workspace_only: bool = True) -> list[dict]:
+    combined = list_cursor_windows(current_workspace_only) + list_codex_windows(
+        current_workspace_only
+    )
+    by_hwnd = {}
+    for window in combined:
+        by_hwnd.setdefault(int(window["hwnd"]), window)
+    return sorted(
+        by_hwnd.values(), key=lambda window: (window["region"][0], window["region"][1])
+    )
