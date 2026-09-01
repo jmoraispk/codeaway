@@ -527,6 +527,15 @@ def execute_matches(
 # ---- bridge: per-window idle detection ---------------------------------
 
 
+def bridge_has_runnable_targets(bridge_cfg: dict) -> bool:
+    """Whether the bridge has windows that can be evaluated this tick."""
+    windows = bridge_cfg.get("windows") or []
+    return bool(windows) and (
+        any(window.get("backend") == "codex_desktop" for window in windows)
+        or bool(bridge_cfg.get("idle_template_path"))
+    )
+
+
 def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list[dict]:
     """Scan each configured Cursor window for the bridge's idle template
     and (optionally) the askuser template.
@@ -549,17 +558,72 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
 
     ``configured`` is False if the window has no region set yet.
     """
+    windows = bridge_cfg.get("windows") or []
+    if not windows:
+        return []
+
+    # Backends own their own readiness semantics and need no legacy idle
+    # template. Evaluate them before entering the template pipeline, which
+    # keeps a Codex-only bridge alive even before a Cursor template exists.
+    from press_backends import backend_for_id
+
+    codex_windows = [
+        window for window in windows if window.get("backend") == "codex_desktop"
+    ]
+    legacy_windows = [
+        window for window in windows if window.get("backend") != "codex_desktop"
+    ]
+    codex_results: list[dict] = []
+    for window in codex_windows:
+        backend = backend_for_id(window.get("backend"))
+        if backend is None:
+            continue
+        state = {
+            "id": window.get("id"),
+            "name": window.get("name", backend.label),
+            "idle": False,
+            "asking": False,
+            "score": 0.0,
+            "configured": False,
+            "detected_agent": backend.id,
+            "backend": backend.id,
+            "ready_count": 0,
+        }
+        region = window.get("region")
+        if not region or len(region) != 4:
+            codex_results.append(state)
+            continue
+        state["configured"] = True
+        try:
+            rgb = capture_screen_rgb(tuple(int(value) for value in region))
+            evaluation = backend.evaluate(rgb)
+        except Exception:
+            codex_results.append(state)
+            continue
+        state.update(
+            {
+                "idle": evaluation.ready,
+                "asking": evaluation.asking,
+                "score": evaluation.score,
+                "ready_count": max(0, int(evaluation.ready_count)),
+            }
+        )
+        if capture_rgb:
+            state["rgb"] = rgb
+        codex_results.append(state)
+
+    idle_ref = bridge_cfg.get("idle_template_path")
+    if not legacy_windows or not idle_ref:
+        return codex_results
+
     import press_dpi
     from press_store import SUPPORTED_DPI_SCALES, dpi_variant_path
 
-    idle_ref = bridge_cfg.get("idle_template_path")
     askuser_ref = bridge_cfg.get("askuser_template_path")
     idle_src_dpi = bridge_cfg.get("idle_template_source_dpi")
     askuser_src_dpi = bridge_cfg.get("askuser_template_source_dpi")
     threshold = float(bridge_cfg.get("idle_threshold", 0.90))
-    windows = bridge_cfg.get("windows") or []
-    if not idle_ref or not windows:
-        return []
+    windows = legacy_windows
 
     # ---- per-monitor matching pipeline ----
     # Old shape was N captures + N×M matches (N windows, M templates).
@@ -624,7 +688,7 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
 
     idle_variants = _load_variants(idle_ref, idle_src_dpi)
     if not idle_variants:
-        return []
+        return codex_results
 
     # Askuser template is optional — if it's missing or unloadable, the
     # detector silently degrades to "asking is always False" and the
@@ -914,4 +978,4 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
             entry["rgb"] = rgb
         results.append(entry)
 
-    return results
+    return codex_results + results

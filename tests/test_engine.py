@@ -1,6 +1,30 @@
 import press_engine
 
 
+def test_codex_is_runnable_without_idle_template():
+    from press_engine import bridge_has_runnable_targets
+
+    assert bridge_has_runnable_targets({
+        "windows": [{"backend": "codex_desktop", "region": [0, 0, 1000, 800]}]
+    }) is True
+
+
+def test_bridge_evaluation_dispatches_codex(monkeypatch):
+    import numpy as np
+
+    rgb = np.full((800, 1000, 3), 24, dtype=np.uint8)
+    rgb[300:307, 198:205] = (47, 129, 247)
+    monkeypatch.setattr(press_engine, "capture_screen_rgb", lambda region=None: rgb)
+
+    states = press_engine.evaluate_bridge_windows({"windows": [{
+        "id": "c1", "name": "Codex", "backend": "codex_desktop", "region": [0, 0, 1000, 800]
+    }]}, capture_rgb=True)
+
+    assert states[0]["idle"] is True
+    assert states[0]["backend"] == "codex_desktop"
+    assert states[0]["ready_count"] == 1
+
+
 def test_pick_template_from_pack_picks_closest_scale():
     """Closest-by-distance pick — a target on the 150 % monitor
     should pull the 150 % variant when one exists, otherwise the

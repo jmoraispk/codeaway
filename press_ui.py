@@ -115,6 +115,7 @@ _RoundMenu.__init__ = _patched_round_menu_init
 
 from press_core import save_gray_image
 from press_engine import (
+    bridge_has_runnable_targets,
     build_runtime_rules,
     capture_screen_gray,
     capture_screen_rgb,
@@ -578,14 +579,12 @@ class EngineWorker(QObject):
         while not self._stop:
             cfg = self._cfg_snapshot()
             bridge_cfg = cfg.get("bridge") or {}
-            # Bridge ticks whenever the service is on AND has windows +
-            # an idle template configured — independent of the Start
-            # button, so flipping the bridge switch is enough to start
-            # populating the phone's view.
+            # Bridge ticks whenever the service is on AND has runnable
+            # targets — independent of the Start button, so flipping the
+            # bridge switch is enough to start populating the phone's view.
             bridge_should_tick = bool(
                 cfg.get("bridge_active")
-                and bridge_cfg.get("windows")
-                and bridge_cfg.get("idle_template_path")
+                and bridge_has_runnable_targets(bridge_cfg)
             )
             rules_should_tick = self.is_running()
             if not rules_should_tick and not bridge_should_tick:
@@ -677,14 +676,14 @@ class EngineWorker(QObject):
             return self._interval
 
     def _tick_bridge_windows(self, cfg: dict) -> None:
-        """Run the per-window idle detector when the bridge service is
-        active and has windows + a template configured. Emits a snapshot
+        """Run the per-window idle detector when the bridge service has
+        runnable targets. Emits a snapshot
         every tick and a transition only when a window flips between
         idle and busy."""
         if not cfg.get("bridge_active"):
             return
         bridge_cfg = cfg.get("bridge") or {}
-        if not bridge_cfg.get("windows") or not bridge_cfg.get("idle_template_path"):
+        if not bridge_has_runnable_targets(bridge_cfg):
             return
         try:
             states = evaluate_bridge_windows(bridge_cfg, capture_rgb=True)

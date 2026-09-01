@@ -174,6 +174,10 @@ class WindowStore:
                 prev = entry["state"] or None
                 prev_idle = bool(prev["idle"]) if prev else None
                 prev_asking = bool(prev.get("asking")) if prev else None
+                try:
+                    ready_count = max(0, int(state.get("ready_count", 0)))
+                except (TypeError, ValueError):
+                    ready_count = 0
                 stored = {
                     "id": wid,
                     "name": state.get("name", "Cursor"),
@@ -188,6 +192,8 @@ class WindowStore:
                     # Stored on every state so summaries() can echo
                     # it without re-running the matcher.
                     "detected_agent": state.get("detected_agent"),
+                    "backend": state.get("backend"),
+                    "ready_count": ready_count,
                 }
                 entry["state"] = stored
                 # Treat idle and asking as the "user can act now" states.
@@ -612,6 +618,13 @@ def _post_scroll_recheck(service: "BridgeService", window_id: str, delay_s: floa
             service.hub.publish_typed("window_state", s)
 
 
+def _can_recheck_window(bridge_cfg: dict, window: dict) -> bool:
+    return (
+        window.get("backend") == "codex_desktop"
+        or bool(bridge_cfg.get("idle_template_path"))
+    )
+
+
 def _post_send_recheck(service: "BridgeService", window_id: str, delay_s: float = 2.0) -> None:
     """Re-evaluate one window after a paste so the phone sees the state
     flip without waiting for the next engine tick. Cursor needs a moment
@@ -630,13 +643,11 @@ def _post_send_recheck(service: "BridgeService", window_id: str, delay_s: float 
     except Exception:
         return
     bridge_cfg = cfg.get("bridge") or {}
-    if not bridge_cfg.get("idle_template_path"):
-        return
     win_cfg = next(
         (w for w in bridge_cfg.get("windows", []) if w.get("id") == window_id),
         None,
     )
-    if not win_cfg:
+    if not win_cfg or not _can_recheck_window(bridge_cfg, win_cfg):
         return
     try:
         from press_engine import evaluate_bridge_windows

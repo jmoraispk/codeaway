@@ -218,6 +218,63 @@ def test_evaluate_bridge_windows_busy_when_template_absent(idle_template, monkey
 # ---- window store -------------------------------------------------------
 
 
+def test_window_summary_includes_backend_and_ready_count():
+    from press_bridge import WindowStore
+
+    store = WindowStore()
+    store.update([{
+        "id": "c1", "name": "Codex", "idle": True, "asking": False,
+        "score": 1.0, "configured": True, "backend": "codex_desktop", "ready_count": 2,
+    }], {})
+
+    assert store.summaries()[0]["backend"] == "codex_desktop"
+    assert store.summaries()[0]["ready_count"] == 2
+
+
+def test_window_summary_clamps_negative_ready_count_to_zero():
+    from press_bridge import WindowStore
+
+    store = WindowStore()
+    store.update([{
+        "id": "c1", "name": "Codex", "idle": False, "asking": False,
+        "score": 0.0, "configured": True, "backend": "codex_desktop", "ready_count": -1,
+    }], {})
+
+    assert store.summaries()[0]["ready_count"] == 0
+
+
+def test_post_send_recheck_evaluates_codex_without_idle_template(fastapi_client, monkeypatch):
+    import press_bridge
+
+    _client, service, calls = fastapi_client
+    calls["cfg"]["bridge"] = {
+        "windows": [{
+            "id": "c1", "name": "Codex", "backend": "codex_desktop",
+            "region": [0, 0, 1000, 800],
+        }]
+    }
+    rgb = np.zeros((2, 2, 3), dtype=np.uint8)
+    seen = []
+
+    def fake_evaluate(bridge_cfg, capture_rgb=False):
+        seen.append((bridge_cfg, capture_rgb))
+        return [{
+            "id": "c1", "name": "Codex", "idle": False, "asking": False,
+            "score": 0.0, "configured": True, "backend": "codex_desktop",
+            "ready_count": 0, "rgb": rgb,
+        }]
+
+    monkeypatch.setattr(press_engine, "evaluate_bridge_windows", fake_evaluate)
+    monkeypatch.setattr(press_bridge.time, "sleep", lambda _seconds: None)
+
+    press_bridge._post_send_recheck(service, "c1", delay_s=0)
+
+    assert seen and seen[0][1] is True
+    [summary] = service.windows.summaries()
+    assert summary["id"] == "c1"
+    assert summary["snapshot_count"] == 1
+
+
 def test_window_store_ring_buffer_caps_at_max():
     from press_bridge import WindowStore
 
