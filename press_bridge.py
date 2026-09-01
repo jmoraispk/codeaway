@@ -730,7 +730,8 @@ class BridgeService:
     ) -> None:
         """Called from the engine worker every detection tick. Updates the
         ring buffer, fans state out over SSE, fires ntfy on busy → idle,
-        and drains one queued message per window that just flipped idle.
+        and drains one queued message per legacy Cursor window that just
+        flipped idle. Codex queue entries are never auto-routed by HWND.
 
         ``prune`` is forwarded to WindowStore.update — the worker tick
         sends a complete states list (prune=True), but partial-recheck
@@ -809,6 +810,8 @@ class BridgeService:
             wid = tr.get("id")
             win_cfg = cfg_windows.get(wid)
             if not win_cfg:
+                continue
+            if win_cfg.get("backend") == "codex_desktop":
                 continue
             text = self.windows.dequeue(wid)
             if text is None:
@@ -1147,14 +1150,18 @@ def build_app(service: BridgeService):
         if service.callbacks.perform_window_send is None:
             raise HTTPException(status_code=501, detail="window send not wired")
 
-        # If the latest tick said the window is idle, send right now.
-        # Otherwise queue the message and let the next idle transition
-        # drain it. Either way the phone gets a clear answer.
+        # Cursor keeps its legacy idle-gated queue. A Codex send is always
+        # explicit: the user selected the visible task before pressing Send,
+        # while Codex's window-wide blue-dot state says nothing about whether
+        # that task's composer can accept input.
         live = service.windows.state_of(window_id)
         is_idle = bool(live and live.get("idle"))
+        send_immediately = (
+            win_cfg.get("backend") == "codex_desktop" or is_idle
+        )
         bridge_cfg = cfg.get("bridge") or {}
 
-        if is_idle:
+        if send_immediately:
             loop = asyncio.get_running_loop()
             try:
                 await loop.run_in_executor(

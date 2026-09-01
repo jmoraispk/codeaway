@@ -739,6 +739,45 @@ def test_window_send_endpoint_queues_when_busy(fastapi_client):
     assert calls["window_send"] == []  # not fired yet
 
 
+def test_codex_send_endpoint_sends_immediately_when_not_ready(fastapi_client):
+    """Codex readiness is window-wide marker state, not composer readiness."""
+    client, service, calls = fastapi_client
+    calls["cfg"]["bridge"] = {
+        "windows": [{
+            "id": "c1",
+            "name": "Codex",
+            "backend": "codex_desktop",
+            "region": [0, 0, 1000, 800],
+        }]
+    }
+    service.windows.update(
+        [{
+            "id": "c1",
+            "name": "Codex",
+            "backend": "codex_desktop",
+            "idle": False,
+            "score": 0.0,
+            "configured": True,
+        }],
+        {},
+    )
+
+    res = client.post("/api/windows/c1/send", json={"text": "continue"})
+
+    assert res.status_code == 200
+    assert res.json() == {"sent": True, "queued": False}
+    assert calls["window_send"] == [(
+        {
+            "id": "c1",
+            "name": "Codex",
+            "backend": "codex_desktop",
+            "region": [0, 0, 1000, 800],
+        },
+        "continue",
+    )]
+    assert service.windows.pending("c1") == []
+
+
 def test_window_send_endpoint_accepts_empty_text_when_idle(fastapi_client):
     """Empty payload = "just click + Enter" — useful when the user has
     already typed the message in the target window and only needs the
@@ -814,6 +853,59 @@ def test_window_queue_drains_one_per_idle_transition(fastapi_client):
     assert len(calls["window_send"]) == 1
     assert calls["window_send"][0][1] == "first"
     assert service.windows.pending("w1") == ["second"]
+
+
+def test_codex_ready_transition_does_not_drain_existing_queue(
+    fastapi_client, monkeypatch
+):
+    """An HWND cannot identify which Codex conversation owns queued text."""
+    import press_bridge
+
+    client, service, calls = fastapi_client
+    calls["cfg"]["bridge"] = {
+        "windows": [{
+            "id": "c1",
+            "name": "Codex",
+            "backend": "codex_desktop",
+            "region": [0, 0, 1000, 800],
+        }]
+    }
+
+    class DeferredThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(press_bridge.threading, "Thread", DeferredThread)
+    service.update_window_states(
+        [{
+            "id": "c1",
+            "name": "Codex",
+            "backend": "codex_desktop",
+            "idle": False,
+            "score": 0.0,
+            "configured": True,
+        }],
+        {},
+    )
+    service.windows.enqueue("c1", "belongs to an earlier task")
+
+    service.update_window_states(
+        [{
+            "id": "c1",
+            "name": "Codex",
+            "backend": "codex_desktop",
+            "idle": True,
+            "score": 1.0,
+            "configured": True,
+        }],
+        {},
+    )
+
+    assert service.windows.pending("c1") == ["belongs to an earlier task"]
+    assert calls["window_send"] == []
 
 
 def test_window_queue_send_now_pops_specific_index_and_fires(fastapi_client):
@@ -1176,6 +1268,86 @@ def test_codex_signature_uses_package_path_not_chatgpt_title():
     )
 
 
+def test_codex_discovery_fails_closed_when_workspace_filter_is_unavailable(
+    monkeypatch, caplog
+):
+    """Cursor stays fail-open, but Codex must never expose another desktop."""
+    from types import SimpleNamespace
+
+    import press_windows
+    import press_workspace
+
+    title = "Task - Cursor"
+
+    class FakeUser32:
+        @staticmethod
+        def EnumWindows(callback, lparam):
+            callback(7, lparam)
+            return True
+
+        @staticmethod
+        def IsWindowVisible(_hwnd):
+            return True
+
+        @staticmethod
+        def IsIconic(_hwnd):
+            return False
+
+        @staticmethod
+        def GetWindowTextLengthW(_hwnd):
+            return len(title)
+
+        @staticmethod
+        def GetWindowTextW(_hwnd, buffer, _length):
+            buffer.value = title
+            return len(title)
+
+        @staticmethod
+        def GetWindowRect(_hwnd, rect):
+            rect._obj.left = 0
+            rect._obj.top = 0
+            rect._obj.right = 1000
+            rect._obj.bottom = 800
+            return True
+
+    monkeypatch.setattr(press_windows, "IS_WINDOWS", True)
+    monkeypatch.setattr(press_windows, "_pin_thread_v2_dpi", lambda: None)
+    monkeypatch.setattr(press_windows, "_configure_process_api", lambda *_args: None)
+    monkeypatch.setattr(
+        press_windows,
+        "_window_process_path",
+        lambda *_args: r"C:\\Program Files\\WindowsApps\\OpenAI.Codex_1\\ChatGPT.exe",
+    )
+    monkeypatch.setattr(
+        press_windows.ctypes,
+        "WINFUNCTYPE",
+        lambda *_args: (lambda callback: callback),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        press_windows.ctypes,
+        "windll",
+        SimpleNamespace(user32=FakeUser32(), kernel32=object()),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        press_workspace, "filter_to_current_workspace", lambda _hwnds: None
+    )
+    caplog.set_level("WARNING", logger="press_windows")
+
+    cursor_windows = press_windows.list_cursor_windows()
+    codex_windows = press_windows.list_codex_windows()
+
+    assert [window["hwnd"] for window in cursor_windows] == [7]
+    assert cursor_windows[0]["backend"] == "cursor"
+    assert codex_windows == []
+    assert any(
+        "Codex" in record.getMessage()
+        and "virtual desktop" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_list_bridge_windows_deduplicates_hwnds(monkeypatch):
     import press_windows
 
@@ -1187,7 +1359,10 @@ def test_list_bridge_windows_deduplicates_hwnds(monkeypatch):
         {"hwnd": 8, "region": [500, 0, 500, 500], "backend": "codex_desktop"},
     ])
 
-    assert [window["hwnd"] for window in press_windows.list_bridge_windows()] == [7, 8]
+    windows = press_windows.list_bridge_windows()
+
+    assert [window["hwnd"] for window in windows] == [7, 8]
+    assert windows[0]["backend"] == "codex_desktop"
 
 
 def test_process_api_uses_pointer_sized_handle_prototypes():

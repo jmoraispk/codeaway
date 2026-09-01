@@ -15,10 +15,12 @@ guarding the import.
 from __future__ import annotations
 
 import ctypes
+import logging
 import sys
 from ctypes import wintypes
 
 IS_WINDOWS = sys.platform.startswith("win")
+LOG = logging.getLogger("press_windows")
 
 
 def _pin_thread_v2_dpi() -> None:
@@ -96,7 +98,12 @@ def _window_process_path(user32, kernel32, hwnd) -> str:
     return ""
 
 
-def _list_visible_windows(current_workspace_only: bool = True) -> list[dict]:
+def _list_visible_windows(
+    current_workspace_only: bool = True,
+    *,
+    fail_closed_when_workspace_unknown: bool = False,
+    target_label: str = "window",
+) -> list[dict]:
     """Enumerate visible, usable top-level windows with process paths.
 
     Each entry:
@@ -116,7 +123,9 @@ def _list_visible_windows(current_workspace_only: bool = True) -> list[dict]:
     IVirtualDesktopManager. Pass False to see windows on every
     desktop — used by the rule's window-scope picker so the user
     can select windows that aren't currently in view but will be
-    when they switch workspaces.
+    when they switch workspaces. ``fail_closed_when_workspace_unknown``
+    returns no candidates (and logs ``target_label``) if membership cannot
+    be verified; the default preserves Cursor's legacy fail-open behavior.
     """
     if not IS_WINDOWS:
         return []
@@ -180,18 +189,30 @@ def _list_visible_windows(current_workspace_only: bool = True) -> list[dict]:
     # "rendered here" from "rendered on another desktop" — both
     # return True. Without this filter, a user with 3 Cursors on
     # desktop A and 3 on desktop B sees all 6 listed as if they
-    # shared the current workspace. None return = filter unavailable
-    # on this platform / API failure → keep everything (safer than
-    # silently dropping the user's actual windows).
+    # shared the current workspace. A None return means the filter is
+    # unavailable: legacy Cursor discovery keeps its fail-open fallback,
+    # while Codex opts into fail-closed because an unverified HWND may
+    # belong to another desktop.
     if current_workspace_only:
+        workspace_error = None
         try:
             from press_workspace import filter_to_current_workspace
 
             keep = filter_to_current_workspace([w["hwnd"] for w in out])
-        except Exception:
+        except Exception as exc:
             keep = None
+            workspace_error = exc
         if keep is not None:
             out = [w for w in out if w["hwnd"] in keep]
+        elif fail_closed_when_workspace_unknown:
+            detail = f": {workspace_error}" if workspace_error else ""
+            LOG.warning(
+                "%s discovery failed closed because current virtual desktop "
+                "membership is unavailable%s",
+                target_label,
+                detail,
+            )
+            return []
     # Sort left-to-right, then top-to-bottom — matches how the user
     # would scan a tiled monitor and makes auto-generated #1, #2, etc.
     # names line up with what they see.
@@ -216,7 +237,11 @@ def _is_codex_process_path(process_path):
 def list_codex_windows(current_workspace_only: bool = True) -> list[dict]:
     return [
         {**candidate, "name": "Codex", "backend": "codex_desktop"}
-        for candidate in _list_visible_windows(current_workspace_only)
+        for candidate in _list_visible_windows(
+            current_workspace_only,
+            fail_closed_when_workspace_unknown=True,
+            target_label="Codex",
+        )
         if _is_codex_process_path(candidate.get("process_path"))
     ]
 
@@ -227,7 +252,9 @@ def list_bridge_windows(current_workspace_only: bool = True) -> list[dict]:
     )
     by_hwnd = {}
     for window in combined:
-        by_hwnd.setdefault(int(window["hwnd"]), window)
+        hwnd = int(window["hwnd"])
+        if hwnd not in by_hwnd or window.get("backend") == "codex_desktop":
+            by_hwnd[hwnd] = window
     return sorted(
         by_hwnd.values(), key=lambda window: (window["region"][0], window["region"][1])
     )

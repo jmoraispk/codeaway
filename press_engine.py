@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 
@@ -16,6 +17,8 @@ from press_store import (
     resolve_template_path,
 )
 
+
+LOG = logging.getLogger("press_engine")
 
 ACTION_SETTLE_DELAY_SEC = 0.20
 
@@ -596,8 +599,26 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
         state["configured"] = True
         try:
             rgb = capture_screen_rgb(tuple(int(value) for value in region))
+        except Exception as exc:
+            LOG.warning(
+                "Codex capture failed for target id=%r name=%r: %s",
+                state["id"],
+                state["name"],
+                exc,
+            )
+            codex_results.append(state)
+            continue
+        try:
             evaluation = backend.evaluate(rgb)
-        except Exception:
+        except Exception as exc:
+            LOG.warning(
+                "Codex evaluation failed for target id=%r name=%r: %s",
+                state["id"],
+                state["name"],
+                exc,
+            )
+            if capture_rgb:
+                state["rgb"] = rgb
             codex_results.append(state)
             continue
         state.update(

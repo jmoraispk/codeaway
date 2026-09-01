@@ -25,6 +25,134 @@ def test_bridge_evaluation_dispatches_codex(monkeypatch):
     assert states[0]["ready_count"] == 1
 
 
+def test_codex_capture_failure_preserves_first_snapshot_opportunity(
+    monkeypatch, caplog
+):
+    import numpy as np
+
+    import press_ui
+
+    rgb = np.full((800, 1000, 3), 24, dtype=np.uint8)
+    captures = 0
+
+    def capture_after_failure(_region=None):
+        nonlocal captures
+        captures += 1
+        if captures == 1:
+            raise RuntimeError("desktop capture unavailable")
+        return rgb
+
+    monkeypatch.setattr(press_engine, "capture_screen_rgb", capture_after_failure)
+    caplog.set_level("WARNING", logger="press_engine")
+    cfg = {
+        "bridge_active": True,
+        "bridge": {
+            "windows": [{
+                "id": "c1",
+                "name": "Codex project alpha",
+                "backend": "codex_desktop",
+                "region": [0, 0, 1000, 800],
+            }]
+        },
+    }
+    worker = press_ui.EngineWorker(lambda: cfg)
+    emissions = []
+    worker.bridge_window_states.connect(
+        lambda states, images: emissions.append((states, images))
+    )
+
+    worker._tick_bridge_windows(cfg)
+
+    assert emissions[0][0][0]["idle"] is False
+    assert emissions[0][0][0]["ready_count"] == 0
+    assert emissions[0][1] == {}
+    assert worker._last_window_idle == {}
+    assert any(
+        "capture" in record.getMessage().lower()
+        and "c1" in record.getMessage()
+        and "Codex project alpha" in record.getMessage()
+        for record in caplog.records
+    )
+
+    worker._tick_bridge_windows(cfg)
+
+    assert emissions[1][0][0]["idle"] is False
+    assert emissions[1][0][0]["ready_count"] == 0
+    assert emissions[1][1]["c1"].startswith(b"\x89PNG\r\n\x1a\n")
+    assert worker._last_window_idle == {"c1": (False, False)}
+
+
+def test_codex_evaluation_failure_retains_rgb_and_logs_target(
+    monkeypatch, caplog
+):
+    import numpy as np
+
+    from press_backend_codex import CodexDesktopBackend
+
+    rgb = np.full((800, 1000, 3), 24, dtype=np.uint8)
+    monkeypatch.setattr(press_engine, "capture_screen_rgb", lambda _region=None: rgb)
+
+    def fail_evaluation(_self, _rgb):
+        raise RuntimeError("marker evaluator unavailable")
+
+    monkeypatch.setattr(CodexDesktopBackend, "evaluate", fail_evaluation)
+    caplog.set_level("WARNING", logger="press_engine")
+
+    [state] = press_engine.evaluate_bridge_windows({
+        "windows": [{
+            "id": "c-eval",
+            "name": "Codex project beta",
+            "backend": "codex_desktop",
+            "region": [0, 0, 1000, 800],
+        }]
+    }, capture_rgb=True)
+
+    assert state["configured"] is True
+    assert state["idle"] is False
+    assert state["asking"] is False
+    assert state["ready_count"] == 0
+    assert state["rgb"] is rgb
+    assert any(
+        "evaluation" in record.getMessage().lower()
+        and "c-eval" in record.getMessage()
+        and "Codex project beta" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_cursor_missing_rgb_keeps_legacy_observation_tracking(monkeypatch):
+    import press_ui
+
+    cfg = {
+        "bridge_active": True,
+        "bridge": {
+            "idle_template_path": "legacy-idle.png",
+            "windows": [{
+                "id": "w1",
+                "name": "Cursor",
+                "region": [0, 0, 1000, 800],
+            }],
+        },
+    }
+    monkeypatch.setattr(
+        press_ui,
+        "evaluate_bridge_windows",
+        lambda _bridge_cfg, capture_rgb=False: [{
+            "id": "w1",
+            "name": "Cursor",
+            "idle": False,
+            "asking": False,
+            "score": 0.0,
+            "configured": True,
+        }],
+    )
+    worker = press_ui.EngineWorker(lambda: cfg)
+
+    worker._tick_bridge_windows(cfg)
+
+    assert worker._last_window_idle == {"w1": (False, False)}
+
+
 def test_pick_template_from_pack_picks_closest_scale():
     """Closest-by-distance pick — a target on the 150 % monitor
     should pull the 150 % variant when one exists, otherwise the

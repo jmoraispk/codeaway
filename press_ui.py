@@ -704,6 +704,7 @@ class EngineWorker(QObject):
         #   - Subsequent ticks: capture only on busy→idle, so steady-
         #     idle and steady-busy don't churn through duplicates.
         images: dict[str, bytes] = {}
+        captured_ids: set[str] = set()
         slim_states: list[dict] = []
         for state in states:
             rgb = state.pop("rgb", None)
@@ -711,6 +712,8 @@ class EngineWorker(QObject):
             wid = state.get("id")
             if not wid or not state.get("configured"):
                 continue
+            if rgb is not None:
+                captured_ids.add(wid)
             is_idle = bool(state.get("idle"))
             is_asking = bool(state.get("asking"))
             actionable = is_idle or is_asking
@@ -729,6 +732,16 @@ class EngineWorker(QObject):
                 continue
             wid = state.get("id")
             if not wid:
+                continue
+            # A safe non-ready Codex state is still published after capture
+            # failure, but it is not an observation. Leaving this target
+            # untracked preserves the first-snapshot opportunity for the
+            # next successful capture, even when that frame has no markers.
+            # Cursor keeps its legacy tracking behavior.
+            if (
+                state.get("backend") == "codex_desktop"
+                and wid not in captured_ids
+            ):
                 continue
             now_idle = bool(state.get("idle"))
             now_asking = bool(state.get("asking"))
