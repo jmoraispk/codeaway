@@ -2598,7 +2598,7 @@ class MainWindow(QMainWindow):
                 count = self._auto_detect_replace_now(reason="workspace change")
                 if count >= 0:
                     self._bridge_log(
-                        f"workspace changed → re-detected {count} Cursor window"
+                        f"workspace changed → re-detected {count} desktop target"
                         f"{'s' if count != 1 else ''}"
                     )
             # Workspace flip already covered this tick's re-detect; skip
@@ -2625,6 +2625,8 @@ class MainWindow(QMainWindow):
                 return False
             if wa.get("name") != wb.get("name"):
                 return False
+            if wa.get("backend") != wb.get("backend"):
+                return False
         return True
 
     def _poll_windows_for_changes(self) -> None:
@@ -2633,10 +2635,10 @@ class MainWindow(QMainWindow):
         poll. Persists + refreshes only on a real diff so steady-
         state desktops don't churn config.json or the worker."""
         from press_store import merge_detected_windows
-        from press_windows import list_cursor_windows
+        from press_windows import list_bridge_windows
 
         try:
-            detected = list_cursor_windows()
+            detected = list_bridge_windows()
         except Exception:
             return
         with self._cfg_lock:
@@ -2651,16 +2653,16 @@ class MainWindow(QMainWindow):
         self._worker.reset_window_tracking()
 
     def _auto_detect_replace_now(self, reason: str = "manual") -> int:
-        """Core auto-detect: enumerate Cursor windows, merge into the
+        """Core auto-detect: enumerate bridge desktop targets, merge into the
         tracked list via HWND, persist, refresh UI, reset worker
         tracking. Returns the new window count, or -1 if the detector
         threw (e.g. non-Windows). Caller logs the user-facing line so
         the message can include trigger-specific context."""
         from press_store import merge_detected_windows
-        from press_windows import list_cursor_windows
+        from press_windows import list_bridge_windows
 
         try:
-            detected = list_cursor_windows()
+            detected = list_bridge_windows()
         except Exception as exc:
             self._bridge_log(f"auto-detect failed ({reason}): {exc}")
             return -1
@@ -2684,12 +2686,11 @@ class MainWindow(QMainWindow):
             return
         if count == 0:
             self._bridge_log(
-                "auto-detect: no visible Cursor windows found "
-                "(minimised / hidden / no 'Cursor' in title)"
+                "auto-detect: no visible desktop targets found"
             )
             return
         self._bridge_log(
-            f"auto-detect: tracking {count} Cursor window"
+            f"auto-detect: tracking {count} desktop target"
             f"{'s' if count != 1 else ''}"
         )
 
@@ -4194,7 +4195,7 @@ class MainWindow(QMainWindow):
     def _bridge_perform_window_scroll(
         self, window: dict, amount: int, bridge_cfg: dict
     ) -> None:
-        """Focus Cursor's chat history with a slow double-click and press
+        """Focus a desktop target's chat history with a slow double-click and press
         the arrow key ``|amount|`` times to scroll roughly one screen.
         Positive ``amount`` scrolls up (older messages into view),
         negative scrolls down (newer messages).
@@ -4206,13 +4207,16 @@ class MainWindow(QMainWindow):
         endpoint then schedules a snapshot recapture so the phone
         shows the scrolled view.
         """
+        from press_backends import backend_scroll_target
         from press_core import focus_and_press_arrow
 
         region = window.get("region")
         if not region or len(region) != 4:
             return
         x, y, w, h = (int(region[0]), int(region[1]), int(region[2]), int(region[3]))
-        target = (x + int(w * 0.05), y + h // 2)
+        target = backend_scroll_target(window)
+        if target is None:
+            target = (x + int(w * 0.05), y + h // 2)
         direction = "down" if int(amount) < 0 else "up"
         focus_and_press_arrow(target, direction, abs(int(amount)))
 
@@ -4231,6 +4235,7 @@ class MainWindow(QMainWindow):
         physical pixels, so fractions multiply directly back to the
         same physical coordinate space. Returns the (x, y) actually
         clicked so the endpoint can echo it back to the phone."""
+        from press_backends import backend_click_target
         from press_core import click_point
 
         region = window.get("region")
@@ -4242,8 +4247,13 @@ class MainWindow(QMainWindow):
             int(region[2]),
             int(region[3]),
         )
-        target_x = rx + int(round(x_frac * rw))
-        target_y = ry + int(round(y_frac * rh))
+        target = None
+        if window.get("backend") == "codex_desktop":
+            rgb = capture_screen_rgb((rx, ry, rw, rh))
+            target = backend_click_target(window, x_frac, y_frac, rgb)
+        if target is None:
+            target = (rx + int(round(x_frac * rw)), ry + int(round(y_frac * rh)))
+        target_x, target_y = target
         click_point((target_x, target_y))
         return (target_x, target_y)
 
@@ -4578,15 +4588,18 @@ class MainWindow(QMainWindow):
     def _bridge_perform_window_send(
         self, window: dict, text: str, bridge_cfg: dict
     ) -> None:
-        """Click into a Cursor window's chat input, paste text, press Enter.
+        """Click into a desktop target's chat input, paste text, press Enter.
 
         Click target is window['chat_target'] when set; otherwise we fall
         back to the centre of the bottom 15% of the region — a reasonable
         default for Cursor's chat input position.
         """
+        from press_backends import backend_send_target
         from press_core import click_point, paste_text_and_enter
 
-        target = window.get("chat_target")
+        target = backend_send_target(window)
+        if target is None:
+            target = window.get("chat_target")
         if not target:
             region = window.get("region")
             if not region or len(region) != 4:

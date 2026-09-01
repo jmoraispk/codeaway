@@ -1,6 +1,7 @@
 import numpy as np
 
 from press_backend_codex import CodexDesktopBackend
+from press_backends import backend_click_target, backend_scroll_target, backend_send_target
 
 
 def frame(width=1000, height=800):
@@ -45,3 +46,23 @@ def test_action_targets_use_output_and_composer():
     backend = CodexDesktopBackend()
     assert backend.scroll_target([100, 200, 1000, 800]) == (700, 560)
     assert backend.send_target([100, 200, 1000, 800]) == (700, 936)
+
+
+def test_backend_click_target_translates_codex_local_result_to_screen_pixels():
+    rgb = frame()
+    rgb[300:307, 198:205] = (47, 129, 247)
+    window = {"backend": "codex_desktop", "region": [100, 200, 1000, 800]}
+    assert backend_click_target(window, 0.202, 0.38, rgb) == (276, 503)
+
+
+def test_backend_action_targets_return_absolute_codex_points():
+    window = {"backend": "codex_desktop", "region": [100, 200, 1000, 800]}
+    assert backend_scroll_target(window) == (700, 560)
+    assert backend_send_target(window) == (700, 936)
+
+
+def test_backend_action_targets_defer_legacy_windows():
+    window = {"backend": "cursor", "region": [100, 200, 1000, 800]}
+    assert backend_click_target(window, 0.5, 0.5, frame()) is None
+    assert backend_scroll_target(window) is None
+    assert backend_send_target(window) is None
