@@ -1268,10 +1268,10 @@ def test_codex_signature_uses_package_path_not_chatgpt_title():
     )
 
 
-def test_codex_discovery_fails_closed_when_workspace_filter_is_unavailable(
+def test_combined_discovery_rejects_codex_cursor_fallback_when_workspace_unknown(
     monkeypatch, caplog
 ):
-    """Cursor stays fail-open, but Codex must never expose another desktop."""
+    """Known Codex executables fail closed; actual Cursor stays fail-open."""
     from types import SimpleNamespace
 
     import press_windows
@@ -1313,10 +1313,13 @@ def test_codex_discovery_fails_closed_when_workspace_filter_is_unavailable(
     monkeypatch.setattr(press_windows, "IS_WINDOWS", True)
     monkeypatch.setattr(press_windows, "_pin_thread_v2_dpi", lambda: None)
     monkeypatch.setattr(press_windows, "_configure_process_api", lambda *_args: None)
+    process_path = {
+        "value": r"C:\\Program Files\\WindowsApps\\OpenAI.Codex_1\\ChatGPT.exe"
+    }
     monkeypatch.setattr(
         press_windows,
         "_window_process_path",
-        lambda *_args: r"C:\\Program Files\\WindowsApps\\OpenAI.Codex_1\\ChatGPT.exe",
+        lambda *_args: process_path["value"],
     )
     monkeypatch.setattr(
         press_windows.ctypes,
@@ -1335,17 +1338,22 @@ def test_codex_discovery_fails_closed_when_workspace_filter_is_unavailable(
     )
     caplog.set_level("WARNING", logger="press_windows")
 
-    cursor_windows = press_windows.list_cursor_windows()
+    bridge_windows = press_windows.list_bridge_windows()
     codex_windows = press_windows.list_codex_windows()
 
-    assert [window["hwnd"] for window in cursor_windows] == [7]
-    assert cursor_windows[0]["backend"] == "cursor"
+    assert bridge_windows == []
     assert codex_windows == []
     assert any(
         "Codex" in record.getMessage()
         and "virtual desktop" in record.getMessage()
         for record in caplog.records
     )
+
+    process_path["value"] = r"C:\\Program Files\\Cursor\\Cursor.exe"
+    cursor_windows = press_windows.list_cursor_windows()
+
+    assert [window["hwnd"] for window in cursor_windows] == [7]
+    assert cursor_windows[0]["backend"] == "cursor"
 
 
 def test_list_bridge_windows_deduplicates_hwnds(monkeypatch):

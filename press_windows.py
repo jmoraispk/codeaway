@@ -221,11 +221,18 @@ def _list_visible_windows(
 
 
 def list_cursor_windows(current_workspace_only: bool = True) -> list[dict]:
-    """Enumerate visible Cursor windows, preserving legacy title matching."""
+    """Enumerate visible Cursor windows, preserving legacy title matching.
+
+    Executable identity wins over a coincidental title: the packaged Codex
+    app can surface task text containing ``Cursor``, but it must still pass
+    Codex's stricter current-workspace safety policy instead of falling back
+    through this legacy detector.
+    """
     return [
         {**candidate, "backend": "cursor"}
         for candidate in _list_visible_windows(current_workspace_only)
         if "Cursor" in candidate["title"]
+        and not _is_codex_process_path(candidate.get("process_path"))
     ]
 
 
