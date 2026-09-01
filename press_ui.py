@@ -4210,11 +4210,11 @@ class MainWindow(QMainWindow):
         from press_backends import backend_scroll_target
         from press_core import focus_and_press_arrow
 
+        target = backend_scroll_target(window)
         region = window.get("region")
         if not region or len(region) != 4:
             return
         x, y, w, h = (int(region[0]), int(region[1]), int(region[2]), int(region[3]))
-        target = backend_scroll_target(window)
         if target is None:
             target = (x + int(w * 0.05), y + h // 2)
         direction = "down" if int(amount) < 0 else "up"
@@ -4239,16 +4239,21 @@ class MainWindow(QMainWindow):
         from press_core import click_point
 
         region = window.get("region")
+        is_codex = window.get("backend") == "codex_desktop"
         if not region or len(region) != 4:
+            if is_codex:
+                raise ValueError("backend region must have four integer values")
             raise RuntimeError("window has no region")
-        rx, ry, rw, rh = (
-            int(region[0]),
-            int(region[1]),
-            int(region[2]),
-            int(region[3]),
-        )
+        try:
+            rx, ry, rw, rh = (int(region[0]), int(region[1]), int(region[2]), int(region[3]))
+        except (TypeError, ValueError):
+            if is_codex:
+                raise ValueError("backend region must have four integer values") from None
+            raise
+        if is_codex and (rw <= 0 or rh <= 0):
+            raise ValueError("backend region must have positive width and height")
         target = None
-        if window.get("backend") == "codex_desktop":
+        if is_codex:
             rgb = capture_screen_rgb((rx, ry, rw, rh))
             target = backend_click_target(window, x_frac, y_frac, rgb)
         if target is None:

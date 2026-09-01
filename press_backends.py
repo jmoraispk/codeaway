@@ -30,13 +30,18 @@ def backend_for_id(backend_id):
 
 def _backend_with_region(window: dict):
     backend = backend_for_id(window.get("backend"))
+    if backend is None:
+        return None, None
     region = window.get("region")
-    if backend is None or not isinstance(region, (list, tuple)) or len(region) != 4:
-        return None, None
+    if not isinstance(region, (list, tuple)) or len(region) != 4:
+        raise ValueError("backend region must have four integer values")
     try:
-        return backend, [int(value) for value in region]
+        normalized = [int(value) for value in region]
     except (TypeError, ValueError):
-        return None, None
+        raise ValueError("backend region must have four integer values") from None
+    if normalized[2] <= 0 or normalized[3] <= 0:
+        raise ValueError("backend region must have positive width and height")
+    return backend, normalized
 
 
 def backend_click_target(window: dict, x_frac: float, y_frac: float, rgb):

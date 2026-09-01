@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from press_backend_codex import CodexDesktopBackend
 from press_backends import backend_click_target, backend_scroll_target, backend_send_target
@@ -66,3 +67,29 @@ def test_backend_action_targets_defer_legacy_windows():
     assert backend_click_target(window, 0.5, 0.5, frame()) is None
     assert backend_scroll_target(window) is None
     assert backend_send_target(window) is None
+
+
+@pytest.mark.parametrize(
+    "region",
+    ([100, 200, 0, 800], [100, 200, 1000, -1]),
+)
+def test_backend_action_targets_reject_non_positive_codex_extents(region):
+    window = {"backend": "codex_desktop", "region": region}
+
+    with pytest.raises(ValueError, match="positive width and height"):
+        backend_click_target(window, 0.5, 0.5, None)
+    with pytest.raises(ValueError, match="positive width and height"):
+        backend_scroll_target(window)
+    with pytest.raises(ValueError, match="positive width and height"):
+        backend_send_target(window)
+
+
+def test_backend_action_targets_reject_malformed_codex_regions():
+    window = {"backend": "codex_desktop", "region": [100, 200, "wide", 800]}
+
+    with pytest.raises(ValueError, match="four integer values"):
+        backend_click_target(window, 0.5, 0.5, None)
+    with pytest.raises(ValueError, match="four integer values"):
+        backend_scroll_target(window)
+    with pytest.raises(ValueError, match="four integer values"):
+        backend_send_target(window)
