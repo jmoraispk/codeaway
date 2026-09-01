@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="stylesheet" href="/static/style.css?v=35">
+  <link rel="stylesheet" href="/static/style.css?v=36">
   <title>auto-press</title>
 </head>
 <body>
@@ -83,11 +83,10 @@
         <span id="ws-label" class="ws-label muted">workspace</span>
         <button id="ws-next" class="ghost ws-arrow" aria-label="Next workspace">▶</button>
       </div>
-      <ul id="windows" aria-label="Cursor windows"></ul>
+      <ul id="windows" aria-label="Desktop agent targets"></ul>
       <p id="empty-hint" class="muted" hidden>
-        No windows yet. Open the desktop app, switch to the Bridge tab,
-        capture an idle template, and turn the Bridge service on — Cursor
-        windows on the current workspace are detected automatically.
+        No targets yet. Keep Codex visible on the current Windows desktop and
+        confirm the bridge is running.
       </p>
     </section>
 
@@ -150,6 +149,7 @@
     <div id="lightbox-tap-hint" class="lightbox-tap-hint">Tap to pick a click point</div>
   </div>
 
-  <script src="/static/app.js?v=35"></script>
+  <script src="/static/status.js?v=1"></script>
+  <script src="/static/app.js?v=36"></script>
 </body>
 </html>

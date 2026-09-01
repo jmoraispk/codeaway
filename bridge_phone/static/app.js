@@ -1,8 +1,7 @@
 // auto-press phone bridge — vanilla JS, no build step.
 //
-// Lists configured Cursor windows with idle / asking / busy status from
-// SSE; tap in for snapshot thumbnails (click to expand) and a send
-// composer.
+// Lists configured desktop agent targets with bridge status from SSE; tap in
+// for snapshot thumbnails (click to expand) and a send composer.
 
 // Resolve a window's tri-state from the bridge's flags. Asking
 // (multiple-choice question pending) takes precedence over idle,
@@ -155,6 +154,8 @@ function renderWindows() {
     const li = document.createElement("li");
     const isSelected = state.current === w.id;
     const stateName = windowState(w);
+    const status = AutoPressStatus.stateLabel(w);
+    const backend = AutoPressStatus.backendLabel(w);
     li.className =
       "window " + stateName +
       (isSelected ? " selected" : "");
@@ -167,11 +168,13 @@ function renderWindows() {
       <div class="window-head">
         <span class="dot" aria-hidden="true"></span>
         <div class="name"></div>
+        <span class="backend-label"></span>
         <button class="window-rename" title="Rename" aria-label="Rename">✎</button>
       </div>
-      <div class="sub">${stateName}${pendingTag}</div>
+      <div class="sub">${status}${pendingTag}</div>
     `;
     li.querySelector(".name").textContent = w.name || w.id;
+    li.querySelector(".backend-label").textContent = backend;
     li.querySelector(".window-rename").addEventListener("click", (e) => {
       e.stopPropagation();
       promptRenameWindow(w);
@@ -248,13 +251,12 @@ function renderWindowDetail(refetchSnapshots) {
   const id = state.current;
   if (!id) return;
   const w = state.windows.get(id);
-  // The list card already shows the dot colour + "busy/idle" text, so
+  // The list card already shows the dot colour + human-readable state, so
   // the detail title used to repeat it on its own line. Fold it into
   // the heading instead — "Window Name (Busy)" — to spend the row on
   // the name and keep the status legible at a glance.
   const name = w ? (w.name || id) : id;
-  // Same tri-state precedence as the window list: asking > idle > busy.
-  const stateName = w ? windowState(w) : "";
+  const stateName = w ? AutoPressStatus.stateLabel(w) : "";
   const status = stateName
     ? stateName.charAt(0).toUpperCase() + stateName.slice(1)
     : "";

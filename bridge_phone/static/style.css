@@ -368,6 +368,11 @@ main { display: flex; flex-direction: column; gap: 14px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.backend-label {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
 .window .sub {
   font-size: 11px;
   color: var(--muted);
