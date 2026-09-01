@@ -1133,6 +1133,38 @@ def test_list_bridge_windows_deduplicates_hwnds(monkeypatch):
     assert [window["hwnd"] for window in press_windows.list_bridge_windows()] == [7, 8]
 
 
+def test_process_api_uses_pointer_sized_handle_prototypes():
+    import ctypes
+    from ctypes import wintypes
+    from types import SimpleNamespace
+
+    import press_windows
+
+    user32 = SimpleNamespace(GetWindowThreadProcessId=lambda *_args: 0)
+    kernel32 = SimpleNamespace(
+        OpenProcess=lambda *_args: None,
+        QueryFullProcessImageNameW=lambda *_args: 0,
+        CloseHandle=lambda *_args: 0,
+    )
+
+    press_windows._configure_process_api(user32, kernel32)
+
+    assert user32.GetWindowThreadProcessId.argtypes == [
+        wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+    ]
+    assert user32.GetWindowThreadProcessId.restype is wintypes.DWORD
+    assert kernel32.OpenProcess.argtypes == [
+        wintypes.DWORD, wintypes.BOOL, wintypes.DWORD
+    ]
+    assert kernel32.OpenProcess.restype is wintypes.HANDLE
+    assert kernel32.QueryFullProcessImageNameW.argtypes == [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+    ]
+    assert kernel32.QueryFullProcessImageNameW.restype is wintypes.BOOL
+    assert kernel32.CloseHandle.argtypes == [wintypes.HANDLE]
+    assert kernel32.CloseHandle.restype is wintypes.BOOL
+
+
 # ---- Workspace binding ----------------------------------------------------
 
 def test_workspace_switch_endpoint_400_for_bad_direction(fastapi_client):

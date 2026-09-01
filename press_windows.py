@@ -53,6 +53,25 @@ def _short_label(title: str) -> str:
     return head or "Cursor"
 
 
+def _configure_process_api(user32, kernel32) -> None:
+    """Declare pointer-safe ctypes signatures for process-path lookup."""
+    user32.GetWindowThreadProcessId.argtypes = [
+        wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+    ]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    kernel32.OpenProcess.argtypes = [
+        wintypes.DWORD, wintypes.BOOL, wintypes.DWORD
+    ]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+
 def _window_process_path(user32, kernel32, hwnd) -> str:
     """Return an HWND's executable path, or an empty string on failure."""
     try:
@@ -105,6 +124,7 @@ def _list_visible_windows(current_workspace_only: bool = True) -> list[dict]:
     _pin_thread_v2_dpi()
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
+    _configure_process_api(user32, kernel32)
     out: list[dict] = []
 
     WNDENUMPROC = ctypes.WINFUNCTYPE(
