@@ -411,6 +411,72 @@ button.primary {
   font-size: 16px;
   margin: 6px 0 4px;
 }
+
+/* Codex Agent Window v2: the task navigator remains visible while the
+   conversation and composer sit below it. Each image is a real calibrated
+   desktop surface, not a CSS crop of a full-window screenshot. */
+#agent-window {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0 12px;
+}
+#agent-window[hidden] { display: none; }
+.agent-window-heading,
+.agent-surface-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.agent-window-heading > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+#agent-calibration { font-size: 11px; }
+#agent-refresh { padding: 5px 9px; font-size: 12px; flex-shrink: 0; }
+.agent-surface-card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  padding: 7px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+.agent-surface-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0 2px 6px;
+}
+.agent-surface-title .muted { font-size: 10px; font-weight: 400; }
+.agent-surface-viewport {
+  overflow: auto;
+  border-radius: 7px;
+  background: #050608;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  overscroll-behavior: contain;
+}
+.agent-surface-viewport img {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 80px;
+  object-fit: contain;
+  object-position: top left;
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-drag: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.navigator-viewport { max-height: 42dvh; }
+.conversation-viewport { max-height: 58dvh; }
+#agent-sidebar-card {
+  position: sticky;
+  top: calc(4px + var(--safe-top));
+  z-index: 5;
+}
+.agent-surface-card.loading img { opacity: 0.45; }
+.agent-surface-card.error { border-color: rgba(239, 68, 68, 0.65); }
 #snap-back {
   margin-bottom: 6px;
   padding: 4px 10px;

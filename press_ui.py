@@ -1764,6 +1764,13 @@ class MainWindow(QMainWindow):
         svc_row.addStretch(1)
         outer.addLayout(svc_row)
 
+        # Codex v2 calibration is intentionally a compact, first-class card.
+        # Legacy Cursor templates remain below untouched, while Codex users
+        # can describe the three interaction surfaces once and then work from
+        # the phone without percentage-based focus guesses.
+        agent_window_card = self._build_codex_agent_window_card()
+        outer.addWidget(agent_window_card)
+
         # Templates card — idle marker + optional askuser (multi-choice)
         # marker. The detector matches both inside each window region
         # and reports back a (idle, asking) pair for each window.
@@ -1995,6 +2002,66 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(body_split, 1)
         return page
+
+    def _build_codex_agent_window_card(self) -> "CollapsibleCard":
+        card = CollapsibleCard("Codex Agent Window v2")
+        info = ToolButton(FIF.INFO)
+        info.setFixedSize(22, 22)
+        info.setToolTip(
+            "One-time calibration for the phone workspace. Drag three boxes "
+            "inside Codex: the task sidebar, the conversation viewport, and "
+            "the message composer. Coordinates scale with the Codex window."
+        )
+        card.headerLayout.insertWidget(1, info)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(2, 0, 2, 0)
+        body.setSpacing(8)
+
+        intro = CaptionLabel(
+            "Choose the Codex window, then drag each surface. Auto Press hides "
+            "while you calibrate so the Codex layout stays visible."
+        )
+        intro.setWordWrap(True)
+        body.addWidget(intro)
+
+        target_row = QHBoxLayout()
+        target_row.setSpacing(8)
+        target_row.addWidget(BodyLabel("Window"))
+        self._codex_agent_window_combo = ComboBox()
+        self._codex_agent_window_combo.setMinimumWidth(220)
+        self._codex_agent_window_combo.currentTextChanged.connect(
+            lambda _text: self._refresh_codex_agent_window_status()
+        )
+        target_row.addWidget(self._codex_agent_window_combo, 1)
+        body.addLayout(target_row)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self._codex_surface_buttons = {}
+        labels = {
+            "sidebar": "Set sidebar",
+            "conversation": "Set conversation",
+            "composer": "Set composer",
+        }
+        for surface, label in labels.items():
+            button = PushButton(FIF.CAMERA, label)
+            button.clicked.connect(
+                lambda _checked=False, name=surface: self._capture_codex_surface(name)
+            )
+            self._codex_surface_buttons[surface] = button
+            buttons.addWidget(button)
+        self._codex_surface_reset = PushButton(FIF.DELETE, "Reset")
+        self._codex_surface_reset.clicked.connect(self._reset_codex_surfaces)
+        buttons.addWidget(self._codex_surface_reset)
+        body.addLayout(buttons)
+
+        self._codex_agent_window_status = CaptionLabel("No Codex window detected.")
+        self._codex_agent_window_status.setWordWrap(True)
+        body.addWidget(self._codex_agent_window_status)
+        card.viewLayout.addLayout(body)
+        self._refresh_codex_agent_window_controls()
+        return card
 
     def _build_agent_packs_card(self) -> "CollapsibleCard":
         """Per-agent template captures. Each registered pack gets a
@@ -2713,6 +2780,134 @@ class MainWindow(QMainWindow):
                 return idx
         return None
 
+    def _selected_codex_agent_window(self) -> Optional[dict]:
+        combo = getattr(self, "_codex_agent_window_combo", None)
+        if combo is None or combo.count() == 0:
+            return None
+        window_id = combo.itemData(combo.currentIndex())
+        return next(
+            (
+                window
+                for window in self._cfg.get("bridge", {}).get("windows", [])
+                if window.get("id") == window_id
+                and window.get("backend") == "codex_desktop"
+            ),
+            None,
+        )
+
+    def _refresh_codex_agent_window_controls(self) -> None:
+        combo = getattr(self, "_codex_agent_window_combo", None)
+        if combo is None:
+            return
+        previous = combo.itemData(combo.currentIndex()) if combo.count() else None
+        windows = [
+            window
+            for window in self._cfg.get("bridge", {}).get("windows", [])
+            if window.get("backend") == "codex_desktop"
+        ]
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for window in windows:
+                combo.addItem(window.get("name") or "Codex", userData=window.get("id"))
+            if previous is not None:
+                for index in range(combo.count()):
+                    if combo.itemData(index) == previous:
+                        combo.setCurrentIndex(index)
+                        break
+        finally:
+            combo.blockSignals(False)
+        self._refresh_codex_agent_window_status()
+
+    def _refresh_codex_agent_window_status(self) -> None:
+        status = getattr(self, "_codex_agent_window_status", None)
+        if status is None:
+            return
+        window = self._selected_codex_agent_window()
+        enabled = window is not None
+        for button in getattr(self, "_codex_surface_buttons", {}).values():
+            button.setEnabled(enabled)
+        reset = getattr(self, "_codex_surface_reset", None)
+        if reset is not None:
+            reset.setEnabled(enabled)
+        if window is None:
+            status.setText(
+                "No Codex window detected. Keep Codex visible and choose Auto-detect."
+            )
+            return
+        surfaces = window.get("agent_surfaces")
+        surfaces = surfaces if isinstance(surfaces, dict) else {}
+        labels = []
+        for name in ("sidebar", "conversation", "composer"):
+            labels.append(f"{name.title()} {'✓' if surfaces.get(name) else '—'}")
+        complete = all(surfaces.get(name) for name in ("sidebar", "conversation", "composer"))
+        suffix = "Phone workspace ready." if complete else "Defaults active until all three are set."
+        status.setText(" · ".join(labels) + f" — {suffix}")
+
+    def _capture_codex_surface(self, surface: str) -> None:
+        window = self._selected_codex_agent_window()
+        if window is None:
+            self._bridge_log("Codex calibration: no selected window")
+            return
+        from press_backends import normalize_surface_capture
+        from press_windows import activate_window
+
+        hwnd = window.get("hwnd")
+        self.hide()
+        QApplication.processEvents()
+        try:
+            if hwnd is None or not activate_window(int(hwnd)):
+                raise RuntimeError("could not activate the selected Codex window")
+            time.sleep(0.12)
+            bbox = capture_drag_bbox(self)
+        except Exception as exc:
+            bbox = None
+            self._bridge_log(f"Codex calibration failed: {exc}")
+        finally:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        if not bbox:
+            self._bridge_log(f"Codex {surface} calibration cancelled")
+            return
+        try:
+            normalized = normalize_surface_capture(window, bbox)
+        except ValueError as exc:
+            self._bridge_log(f"Codex {surface} calibration rejected: {exc}")
+            return
+        with self._cfg_lock:
+            index = self._find_window_index(window.get("id"))
+            if index is None:
+                return
+            target = self._cfg["bridge"]["windows"][index]
+            surfaces = target.setdefault("agent_surfaces", {})
+            surfaces[surface] = normalized
+        self._persist()
+        self._refresh_codex_agent_window_status()
+        self._worker.reset_window_tracking()
+        self._bridge_log(
+            f"Codex {surface} calibrated → "
+            f"{', '.join(f'{value:.3f}' for value in normalized)}"
+        )
+
+    def _reset_codex_surfaces(self) -> None:
+        window = self._selected_codex_agent_window()
+        if window is None:
+            return
+        with self._cfg_lock:
+            index = self._find_window_index(window.get("id"))
+            if index is None:
+                return
+            self._cfg["bridge"]["windows"][index]["agent_surfaces"] = {
+                "sidebar": None,
+                "conversation": None,
+                "composer": None,
+            }
+        self._persist()
+        self._refresh_codex_agent_window_status()
+        self._worker.reset_window_tracking()
+        self._bridge_log("Codex Agent Window calibration reset; defaults are active")
+
     def _refresh_bridge_windows_table(self) -> None:
         table = getattr(self, "_bridge_windows_table", None)
         if table is None:
@@ -2749,6 +2944,7 @@ class MainWindow(QMainWindow):
             # buttons. Rename is still available via the inline
             # LineEdit in column 0.
             table.setItem(row, 2, QTableWidgetItem(""))
+        self._refresh_codex_agent_window_controls()
 
     def _rename_bridge_window(self, window_id: str, new_text: str) -> None:
         new_name = new_text.strip() or "Cursor"
@@ -4205,24 +4401,33 @@ class MainWindow(QMainWindow):
             clipboard_restore_delay_ms=int(bridge_cfg.get("clipboard_restore_delay_ms", 500)),
         )
 
+    def _bridge_activate_window(self, window: dict) -> None:
+        """Make an HWND-backed target safe for absolute input injection."""
+        hwnd = window.get("hwnd")
+        if hwnd is None:
+            if window.get("backend") == "codex_desktop":
+                raise RuntimeError("Codex target has no window handle")
+            return
+        from press_windows import activate_window
+
+        if not activate_window(int(hwnd)):
+            name = window.get("name") or "Codex"
+            raise RuntimeError(f"could not activate {name}")
+
     def _bridge_perform_window_scroll(
         self, window: dict, amount: int, bridge_cfg: dict
     ) -> None:
-        """Focus a desktop target's chat history with a slow double-click and press
-        the arrow key ``|amount|`` times to scroll roughly one screen.
+        """Focus and scroll a desktop target's conversation surface.
+
+        Codex uses native wheel input at its calibrated conversation center.
+        Legacy backends retain the existing slow double-click + arrow keys.
         Positive ``amount`` scrolls up (older messages into view),
         negative scrolls down (newer messages).
-
-        Click target is 5% in from the left edge, 50% down — sits hard
-        against the gutter, well outside the chat text where a double-
-        click can highlight a word or follow a hyperlink. (10% used to
-        catch text occasionally on narrow Cursor windows.) The bridge
-        endpoint then schedules a snapshot recapture so the phone
-        shows the scrolled view.
         """
         from press_backends import backend_scroll_target
-        from press_core import focus_and_press_arrow
+        from press_core import focus_and_press_arrow, focus_and_scroll
 
+        self._bridge_activate_window(window)
         target = backend_scroll_target(window)
         region = window.get("region")
         if not region or len(region) != 4:
@@ -4231,7 +4436,10 @@ class MainWindow(QMainWindow):
         if target is None:
             target = (x + int(w * 0.05), y + h // 2)
         direction = "down" if int(amount) < 0 else "up"
-        focus_and_press_arrow(target, direction, abs(int(amount)))
+        if window.get("backend") == "codex_desktop":
+            focus_and_scroll(target, int(amount))
+        else:
+            focus_and_press_arrow(target, direction, abs(int(amount)))
 
     def _bridge_perform_window_click_at(
         self,
@@ -4251,6 +4459,7 @@ class MainWindow(QMainWindow):
         from press_backends import backend_click_target
         from press_core import click_point
 
+        self._bridge_activate_window(window)
         region = window.get("region")
         is_codex = window.get("backend") == "codex_desktop"
         if not region or len(region) != 4:
@@ -4615,6 +4824,7 @@ class MainWindow(QMainWindow):
         from press_backends import backend_send_target
         from press_core import click_point, paste_text_and_enter
 
+        self._bridge_activate_window(window)
         target = backend_send_target(window)
         if target is None:
             target = window.get("chat_target")

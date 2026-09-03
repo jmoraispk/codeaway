@@ -2,7 +2,14 @@ import numpy as np
 import pytest
 
 from press_backend_codex import CodexDesktopBackend
-from press_backends import backend_click_target, backend_scroll_target, backend_send_target
+from press_backends import (
+    agent_window_configured,
+    backend_click_target,
+    backend_scroll_target,
+    backend_send_target,
+    normalize_surface_capture,
+    resolve_surface_region,
+)
 
 
 def frame(width=1000, height=800):
@@ -43,10 +50,10 @@ def test_marker_band_miss_still_shifts_left():
     assert CodexDesktopBackend().transform_click(frame(), (200, 500)) == (175, 500)
 
 
-def test_action_targets_use_output_and_composer():
+def test_backend_action_targets_center_the_supplied_surface():
     backend = CodexDesktopBackend()
-    assert backend.scroll_target([100, 200, 1000, 800]) == (700, 560)
-    assert backend.send_target([100, 200, 1000, 800]) == (700, 936)
+    assert backend.scroll_target([100, 200, 1000, 800]) == (600, 600)
+    assert backend.send_target([100, 200, 1000, 800]) == (600, 600)
 
 
 def test_backend_click_target_translates_codex_local_result_to_screen_pixels():
@@ -58,8 +65,67 @@ def test_backend_click_target_translates_codex_local_result_to_screen_pixels():
 
 def test_backend_action_targets_return_absolute_codex_points():
     window = {"backend": "codex_desktop", "region": [100, 200, 1000, 800]}
-    assert backend_scroll_target(window) == (700, 560)
-    assert backend_send_target(window) == (700, 936)
+    assert backend_scroll_target(window) == (710, 552)
+    assert backend_send_target(window) == (700, 912)
+
+
+def test_calibrated_surfaces_drive_capture_scroll_and_send_targets():
+    window = {
+        "backend": "codex_desktop",
+        "region": [100, 200, 1000, 800],
+        "agent_surfaces": {
+            "sidebar": [0.0, 0.0, 0.2, 1.0],
+            "conversation": [0.25, 0.1, 0.70, 0.65],
+            "composer": [0.35, 0.82, 0.50, 0.12],
+        },
+    }
+
+    assert agent_window_configured(window) is True
+    assert resolve_surface_region(window, "sidebar") == [100, 200, 200, 800]
+    assert resolve_surface_region(window, "conversation") == [350, 280, 700, 520]
+    assert backend_scroll_target(window) == (700, 540)
+    assert backend_send_target(window) == (700, 904)
+
+
+def test_surface_click_maps_back_to_full_window_before_codex_safety_transform():
+    rgb = frame()
+    window = {
+        "backend": "codex_desktop",
+        "region": [100, 200, 1000, 800],
+        "agent_surfaces": {
+            "sidebar": [0.0, 0.0, 0.22, 1.0],
+            "conversation": None,
+            "composer": None,
+        },
+    }
+
+    assert backend_click_target(
+        window, 0.5, 0.25, rgb, surface="sidebar"
+    ) == (210, 400)
+
+
+def test_absolute_capture_normalizes_and_clips_to_window():
+    window = {"region": [100, 200, 1000, 800]}
+
+    assert normalize_surface_capture(window, [50, 100, 300, 400]) == [
+        0.0,
+        0.0,
+        0.25,
+        0.375,
+    ]
+
+
+def test_uncalibrated_codex_uses_v2_default_surfaces():
+    window = {
+        "backend": "codex_desktop",
+        "region": [100, 200, 1000, 800],
+        "agent_surfaces": {},
+    }
+
+    assert agent_window_configured(window) is False
+    assert resolve_surface_region(window, "sidebar") == [100, 200, 220, 800]
+    assert backend_scroll_target(window) == (710, 552)
+    assert backend_send_target(window) == (700, 912)
 
 
 def test_backend_action_targets_defer_legacy_windows():

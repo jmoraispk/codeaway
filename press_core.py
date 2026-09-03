@@ -464,6 +464,20 @@ def focus_and_press_up(point: tuple[int, int], presses: int = 15) -> None:
     focus_and_press_arrow(point, "up", presses)
 
 
+def focus_and_scroll(point: tuple[int, int], amount: int) -> None:
+    """Focus a calibrated surface and send native mouse-wheel input.
+
+    Codex's nested conversation viewport consumes wheel input at the pointer;
+    unlike Cursor, it does not reliably scroll when arrow keys are sent after
+    a generic focus click.
+    """
+    _pin_thread_v2_dpi()
+    x, y = int(point[0]), int(point[1])
+    _click_at_target(x, y)
+    time.sleep(0.1)
+    pyautogui.scroll(int(amount), x=x, y=y)
+
+
 def get_clipboard_text() -> str:
     """Best-effort current clipboard text (empty string if unavailable)."""
     import pyperclip  # ships transitively with pyautogui

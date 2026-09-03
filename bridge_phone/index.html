@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="stylesheet" href="/static/style.css?v=36">
+  <link rel="stylesheet" href="/static/style.css?v=37">
   <title>auto-press</title>
 </head>
 <body>
@@ -93,6 +93,36 @@
     <section id="snapshots-section" hidden>
       <h2 id="snap-window-name"></h2>
 
+      <section id="agent-window" hidden aria-label="Codex agent workspace">
+        <div class="agent-window-heading">
+          <div>
+            <strong>Agent workspace</strong>
+            <span id="agent-calibration" class="muted"></span>
+          </div>
+          <button id="agent-refresh" class="ghost" aria-label="Refresh agent workspace">↻ Refresh</button>
+        </div>
+
+        <article id="agent-sidebar-card" class="agent-surface-card">
+          <div class="agent-surface-title">
+            <span>Navigator</span>
+            <span class="muted">tap a project or task</span>
+          </div>
+          <div class="agent-surface-viewport navigator-viewport">
+            <img id="agent-sidebar-img" alt="Codex project and task sidebar" draggable="false">
+          </div>
+        </article>
+
+        <article class="agent-surface-card">
+          <div class="agent-surface-title">
+            <span>Conversation</span>
+            <span class="muted">tap controls or scroll below</span>
+          </div>
+          <div class="agent-surface-viewport conversation-viewport">
+            <img id="agent-conversation-img" alt="Current Codex conversation" draggable="false">
+          </div>
+        </article>
+      </section>
+
       <div id="composer">
         <textarea id="send-text" rows="3" placeholder="Paste, type, or leave empty (just clicks + Enter)."></textarea>
         <div class="row">
@@ -121,11 +151,13 @@
         </button>
       </div>
 
-      <h3 class="section-h">Last snapshot</h3>
-      <p id="snap-empty" class="muted" hidden>
-        No snapshot yet — captured each time the window flips busy → idle.
-      </p>
-      <div id="snapshots"></div>
+      <div id="legacy-snapshots">
+        <h3 class="section-h">Last snapshot</h3>
+        <p id="snap-empty" class="muted" hidden>
+          No snapshot yet — captured each time the window flips busy → idle.
+        </p>
+        <div id="snapshots"></div>
+      </div>
     </section>
   </main>
 
@@ -150,6 +182,6 @@
   </div>
 
   <script src="/static/status.js?v=1"></script>
-  <script src="/static/app.js?v=36"></script>
+  <script src="/static/app.js?v=37"></script>
 </body>
 </html>

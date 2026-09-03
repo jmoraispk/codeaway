@@ -325,6 +325,74 @@ def test_merge_detected_windows_preserves_name_and_chat_target_for_known_hwnd():
     assert out["region"] == [100, 100, 900, 700]  # fresh region
 
 
+def test_codex_agent_surfaces_round_trip_and_survive_redetect():
+    surfaces = {
+        "sidebar": [0.0, 0.02, 0.22, 0.96],
+        "conversation": [0.24, 0.04, 0.72, 0.72],
+        "composer": [0.32, 0.82, 0.58, 0.14],
+    }
+    cfg = press_store.normalize_config(
+        {
+            "bridge": {
+                "windows": [
+                    {
+                        "id": "codex-1",
+                        "hwnd": 1234,
+                        "backend": "codex_desktop",
+                        "name": "Codex",
+                        "region": [100, 200, 1000, 800],
+                        "agent_surfaces": surfaces,
+                    }
+                ]
+            }
+        }
+    )
+
+    [normalized] = cfg["bridge"]["windows"]
+    assert normalized["agent_surfaces"] == surfaces
+
+    [merged] = press_store.merge_detected_windows(
+        [normalized],
+        [
+            {
+                "hwnd": 1234,
+                "backend": "codex_desktop",
+                "name": "Codex",
+                "region": [300, 400, 1200, 900],
+            }
+        ],
+    )
+    assert merged["agent_surfaces"] == surfaces
+
+
+def test_invalid_agent_surfaces_are_cleared_independently():
+    cfg = press_store.normalize_config(
+        {
+            "bridge": {
+                "windows": [
+                    {
+                        "backend": "codex_desktop",
+                        "region": [0, 0, 1000, 800],
+                        "agent_surfaces": {
+                            "sidebar": [0.0, 0.0, 0.2, 1.0],
+                            "conversation": [0.8, 0.2, 0.4, 0.5],
+                            "composer": "not-a-region",
+                            "ignored": [0.0, 0.0, 1.0, 1.0],
+                        },
+                    }
+                ]
+            }
+        }
+    )
+
+    [window] = cfg["bridge"]["windows"]
+    assert window["agent_surfaces"] == {
+        "sidebar": [0.0, 0.0, 0.2, 1.0],
+        "conversation": None,
+        "composer": None,
+    }
+
+
 def test_merge_detected_windows_retrims_stale_auto_derived_names():
     """Existing entries with " - " in the name are leftover auto-
     derived titles (or freshly-grown titles); they get re-derived

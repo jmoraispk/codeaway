@@ -89,6 +89,24 @@ uv run main.py --bridge-port 8765       # override default port
 
 Once running, open `http://<laptop-tailscale-id>:8765` from the phone.
 
+### Codex Agent Window v2
+
+The v2 branch keeps the same phone URL but separates Codex into three
+calibrated interaction surfaces instead of guessing points inside the full
+window:
+
+1. Keep Codex visible and choose **Auto-detect** on the Bridge tab.
+2. In **Codex Agent Window v2**, select the Codex window.
+3. Choose **Set sidebar** and drag around the project/task navigator.
+4. Choose **Set conversation** and drag around the scrollable output pane.
+5. Choose **Set composer** and drag around the message input box.
+
+The phone then shows a persistent Navigator above the current Conversation.
+Taps activate the exact Codex HWND before clicking, scrolling uses native
+wheel input inside the calibrated conversation, and Send targets the
+calibrated composer. Calibration is stored as window-relative coordinates, so
+moving or resizing Codex does not require repeating it.
+
 ## ❓ FAQ
 
 <details>

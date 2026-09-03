@@ -568,7 +568,7 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
     # Backends own their own readiness semantics and need no legacy idle
     # template. Evaluate them before entering the template pipeline, which
     # keeps a Codex-only bridge alive even before a Cursor template exists.
-    from press_backends import backend_for_id
+    from press_backends import agent_window_configured, backend_for_id
 
     codex_windows = [
         window for window in windows if window.get("backend") == "codex_desktop"
@@ -591,6 +591,7 @@ def evaluate_bridge_windows(bridge_cfg: dict, capture_rgb: bool = False) -> list
             "detected_agent": backend.id,
             "backend": backend.id,
             "ready_count": 0,
+            "agent_window_configured": agent_window_configured(window),
         }
         region = window.get("region")
         if not region or len(region) != 4:

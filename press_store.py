@@ -22,6 +22,8 @@ MATCHER_TEMPLATE = "template"
 MATCHER_COLOR = "color"
 MATCHER_TYPES = [MATCHER_TEMPLATE, MATCHER_COLOR]
 
+AGENT_SURFACE_NAMES = ("sidebar", "conversation", "composer")
+
 
 def default_rule(name: str = "New Rule") -> dict:
     return {
@@ -82,6 +84,16 @@ def default_bridge_window(name: str = "Cursor") -> dict:
         "region": None,
         "chat_target": None,
         "read_region": None,
+        # Optional backend-owned interaction surfaces, stored as
+        # window-local normalized rectangles [x, y, width, height].
+        # Normalized coordinates survive window moves, resizing, and
+        # mixed-DPI monitor changes. Codex v2 consumes all three; legacy
+        # backends ignore them.
+        "agent_surfaces": {
+            "sidebar": None,
+            "conversation": None,
+            "composer": None,
+        },
     }
 
 
@@ -230,6 +242,35 @@ def _valid_point(value) -> bool:
     return True
 
 
+def _normalize_fractional_region(value) -> list[float] | None:
+    """Validate a normalized [x, y, width, height] rectangle."""
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        x, y, width, height = [float(part) for part in value]
+    except (TypeError, ValueError):
+        return None
+    epsilon = 1e-9
+    if x < 0 or y < 0 or width <= 0 or height <= 0:
+        return None
+    if x + width > 1.0 + epsilon or y + height > 1.0 + epsilon:
+        return None
+    return [
+        max(0.0, min(1.0, x)),
+        max(0.0, min(1.0, y)),
+        min(1.0, width),
+        min(1.0, height),
+    ]
+
+
+def _normalize_agent_surfaces(value) -> dict:
+    raw = value if isinstance(value, dict) else {}
+    return {
+        name: _normalize_fractional_region(raw.get(name))
+        for name in AGENT_SURFACE_NAMES
+    }
+
+
 def _normalize_backend(value) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else "cursor"
 
@@ -310,6 +351,9 @@ def _normalize_window(window: dict | None) -> dict:
         base["chat_target"] = None
     if not _valid_region(base.get("read_region")):
         base["read_region"] = None
+    base["agent_surfaces"] = _normalize_agent_surfaces(
+        base.get("agent_surfaces")
+    )
     # HWND is opaque to us — just check it's an int. None when the
     # entry came from a legacy config that predates dynamic tracking.
     try:

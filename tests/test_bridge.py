@@ -218,17 +218,19 @@ def test_evaluate_bridge_windows_busy_when_template_absent(idle_template, monkey
 # ---- window store -------------------------------------------------------
 
 
-def test_window_summary_includes_backend_and_ready_count():
+def test_window_summary_includes_backend_ready_count_and_agent_window_state():
     from press_bridge import WindowStore
 
     store = WindowStore()
     store.update([{
         "id": "c1", "name": "Codex", "idle": True, "asking": False,
         "score": 1.0, "configured": True, "backend": "codex_desktop", "ready_count": 2,
+        "agent_window_configured": True,
     }], {})
 
     assert store.summaries()[0]["backend"] == "codex_desktop"
     assert store.summaries()[0]["ready_count"] == 2
+    assert store.summaries()[0]["agent_window_configured"] is True
 
 
 def test_window_summary_clamps_negative_ready_count_to_zero():
@@ -685,6 +687,14 @@ def fastapi_client():
     yield client, service, calls
 
 
+def test_events_route_treats_request_as_framework_injection(fastapi_client):
+    """Postponed annotations must not turn Request into a query parameter."""
+    client, service, calls = fastapi_client
+    route = next(route for route in client.app.routes if route.path == "/api/events")
+
+    assert route.dependant.query_params == []
+
+
 def test_window_send_endpoint_sends_immediately_when_idle(fastapi_client):
     """When the live state for a window is idle, /api/windows/{id}/send
     fires the callback synchronously and reports sent=True."""
@@ -1127,6 +1137,113 @@ def test_window_scroll_endpoint_404_for_unknown_window(fastapi_client):
     client, service, calls = fastapi_client
     res = client.post("/api/windows/missing/scroll", json={"amount": 1})
     assert res.status_code == 404
+
+
+def test_codex_surface_endpoint_returns_live_cropped_png(fastapi_client, monkeypatch):
+    client, service, calls = fastapi_client
+    calls["cfg"]["bridge"] = {
+        "windows": [
+            {
+                "id": "c1",
+                "name": "Codex",
+                "backend": "codex_desktop",
+                "region": [100, 200, 1000, 800],
+                "agent_surfaces": {
+                    "sidebar": [0.0, 0.0, 0.2, 1.0],
+                    "conversation": [0.2, 0.0, 0.8, 0.8],
+                    "composer": [0.3, 0.8, 0.6, 0.2],
+                },
+            }
+        ]
+    }
+    captured = []
+
+    def fake_capture(region=None):
+        captured.append(region)
+        return np.full((800, 200, 3), 24, dtype=np.uint8)
+
+    monkeypatch.setattr(press_engine, "capture_screen_rgb", fake_capture)
+
+    res = client.get("/api/windows/c1/surface/sidebar")
+
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/png"
+    assert res.headers["cache-control"] == "no-store"
+    assert res.content.startswith(b"\x89PNG\r\n\x1a\n")
+    assert captured == [(100, 200, 200, 800)]
+
+
+def test_codex_surface_capture_fails_safely_when_window_cannot_activate(
+    fastapi_client, monkeypatch
+):
+    import press_windows
+
+    client, service, calls = fastapi_client
+    calls["cfg"]["bridge"] = {
+        "windows": [
+            {
+                "id": "c1",
+                "hwnd": 77,
+                "backend": "codex_desktop",
+                "region": [100, 200, 1000, 800],
+            }
+        ]
+    }
+    monkeypatch.setattr(press_windows, "activate_window", lambda _hwnd: False)
+
+    res = client.get("/api/windows/c1/surface/sidebar")
+
+    assert res.status_code == 500
+    assert "could not activate target window" in res.text
+
+
+def test_codex_surface_click_maps_surface_fractions_to_whole_window(fastapi_client):
+    client, service, calls = fastapi_client
+    calls["cfg"]["bridge"] = {
+        "windows": [
+            {
+                "id": "c1",
+                "name": "Codex",
+                "backend": "codex_desktop",
+                "region": [100, 200, 1000, 800],
+                "agent_surfaces": {
+                    "sidebar": [0.0, 0.0, 0.2, 1.0],
+                    "conversation": [0.2, 0.0, 0.8, 0.8],
+                    "composer": [0.3, 0.8, 0.6, 0.2],
+                },
+            }
+        ]
+    }
+
+    res = client.post(
+        "/api/windows/c1/click_at",
+        json={"surface": "sidebar", "x_frac": 0.5, "y_frac": 0.25},
+    )
+
+    assert res.status_code == 200
+    assert res.json()["target"] == [200, 400]
+    [(_, x_frac, y_frac, tx, ty)] = calls["window_clicks"]
+    assert (x_frac, y_frac, tx, ty) == (0.1, 0.25, 200, 400)
+
+
+def test_click_rejects_unknown_agent_surface(fastapi_client):
+    client, service, calls = fastapi_client
+    calls["cfg"]["bridge"] = {
+        "windows": [
+            {
+                "id": "c1",
+                "backend": "codex_desktop",
+                "region": [0, 0, 1000, 800],
+            }
+        ]
+    }
+
+    res = client.post(
+        "/api/windows/c1/click_at",
+        json={"surface": "toolbar", "x_frac": 0.5, "y_frac": 0.5},
+    )
+
+    assert res.status_code == 400
 
 
 def test_window_snapshot_endpoint_returns_captured(fastapi_client):

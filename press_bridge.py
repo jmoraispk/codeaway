@@ -194,6 +194,9 @@ class WindowStore:
                     "detected_agent": state.get("detected_agent"),
                     "backend": state.get("backend"),
                     "ready_count": ready_count,
+                    "agent_window_configured": bool(
+                        state.get("agent_window_configured", False)
+                    ),
                 }
                 entry["state"] = stored
                 # Treat idle and asking as the "user can act now" states.
@@ -892,6 +895,12 @@ def build_app(service: BridgeService):
     )
     from fastapi.staticfiles import StaticFiles
 
+    # This module uses postponed annotations while FastAPI is imported lazily.
+    # Route-signature evaluation looks in module globals, not this function's
+    # closure; publish Request so ``request: Request`` remains framework
+    # injection instead of becoming a required query parameter (HTTP 422).
+    globals()["Request"] = Request
+
     app = FastAPI(title="auto-press bridge", docs_url=None, redoc_url=None)
     started_at = time.time()
 
@@ -1317,6 +1326,24 @@ def build_app(service: BridgeService):
             raise HTTPException(status_code=404, detail="window not found")
         if not win_cfg.get("region"):
             raise HTTPException(status_code=400, detail="window has no region")
+        surface = payload.get("surface")
+        if surface is not None:
+            if not isinstance(surface, str):
+                raise HTTPException(status_code=400, detail="surface must be a string")
+            try:
+                from press_backends import resolve_surface_region
+
+                surface_region = resolve_surface_region(win_cfg, surface)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if surface_region is None:
+                raise HTTPException(
+                    status_code=400, detail=f"agent surface is not available: {surface}"
+                )
+            wx, wy, ww, wh = [int(value) for value in win_cfg["region"]]
+            sx, sy, sw, sh = surface_region
+            x_frac = ((sx - wx) + x_frac * sw) / ww
+            y_frac = ((sy - wy) + y_frac * sh) / wh
         if service.callbacks.perform_window_click_at is None:
             raise HTTPException(status_code=501, detail="click_at not wired")
         bridge_cfg = cfg.get("bridge") or {}
@@ -1340,7 +1367,13 @@ def build_app(service: BridgeService):
             args=(service, window_id),
             daemon=True,
         ).start()
-        return JSONResponse({"clicked": True, "target": list(target) if target else None})
+        return JSONResponse(
+            {
+                "clicked": True,
+                "surface": surface,
+                "target": list(target) if target else None,
+            }
+        )
 
     @app.post("/api/windows/{window_id}/snapshot")
     async def window_snapshot(window_id: str) -> JSONResponse:
@@ -1370,6 +1403,51 @@ def build_app(service: BridgeService):
             daemon=True,
         ).start()
         return JSONResponse({"captured": True})
+
+    @app.get("/api/windows/{window_id}/surface/{surface}")
+    async def window_surface(window_id: str, surface: str) -> Response:
+        """Capture one calibrated agent-window surface on demand."""
+        cfg = service.callbacks.cfg_snapshot()
+        win_cfg = next(
+            (
+                window
+                for window in (cfg.get("bridge") or {}).get("windows", [])
+                if window.get("id") == window_id
+            ),
+            None,
+        )
+        if win_cfg is None:
+            raise HTTPException(status_code=404, detail="window not found")
+        try:
+            from press_backends import resolve_surface_region
+
+            region = resolve_surface_region(win_cfg, surface)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if region is None:
+            raise HTTPException(
+                status_code=400, detail=f"agent surface is not available: {surface}"
+            )
+        try:
+            hwnd = win_cfg.get("hwnd")
+            if hwnd is not None:
+                from press_windows import activate_window
+
+                if not activate_window(int(hwnd)):
+                    raise RuntimeError("could not activate target window")
+            from press_engine import capture_screen_rgb
+
+            rgb = capture_screen_rgb(tuple(region))
+            png = _png_from_rgb(rgb)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"surface capture failed: {exc}") from exc
+        if not png:
+            raise HTTPException(status_code=500, detail="surface capture failed")
+        return Response(
+            content=png,
+            media_type="image/png",
+            headers={"Cache-Control": "no-store", "X-Agent-Surface": surface},
+        )
 
     @app.put("/api/windows/{window_id}/queue/{idx}")
     async def queue_update_one(window_id: str, idx: int, payload: dict) -> JSONResponse:

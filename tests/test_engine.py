@@ -23,6 +23,33 @@ def test_bridge_evaluation_dispatches_codex(monkeypatch):
     assert states[0]["idle"] is True
     assert states[0]["backend"] == "codex_desktop"
     assert states[0]["ready_count"] == 1
+    assert states[0]["agent_window_configured"] is False
+
+
+def test_bridge_evaluation_reports_complete_agent_window_calibration(monkeypatch):
+    import numpy as np
+
+    rgb = np.full((800, 1000, 3), 24, dtype=np.uint8)
+    monkeypatch.setattr(press_engine, "capture_screen_rgb", lambda region=None: rgb)
+    [state] = press_engine.evaluate_bridge_windows(
+        {
+            "windows": [
+                {
+                    "id": "c1",
+                    "name": "Codex",
+                    "backend": "codex_desktop",
+                    "region": [0, 0, 1000, 800],
+                    "agent_surfaces": {
+                        "sidebar": [0.0, 0.0, 0.2, 1.0],
+                        "conversation": [0.2, 0.0, 0.8, 0.8],
+                        "composer": [0.3, 0.8, 0.6, 0.2],
+                    },
+                }
+            ]
+        }
+    )
+
+    assert state["agent_window_configured"] is True
 
 
 def test_codex_capture_failure_preserves_first_snapshot_opportunity(

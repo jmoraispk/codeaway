@@ -21,3 +21,6 @@ templates/*
 
 # Runtime logs from restart.ps1 (stdout/stderr capture)
 logs/
+
+# Local browser smoke-test artifacts
+.playwright-cli/

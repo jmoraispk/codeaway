@@ -17,6 +17,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import sys
+import time
 from ctypes import wintypes
 
 IS_WINDOWS = sys.platform.startswith("win")
@@ -265,3 +266,80 @@ def list_bridge_windows(current_workspace_only: bool = True) -> list[dict]:
     return sorted(
         by_hwnd.values(), key=lambda window: (window["region"][0], window["region"][1])
     )
+
+
+def activate_window(hwnd: int) -> bool:
+    """Restore and foreground one exact top-level window.
+
+    Absolute screen clicks are unsafe when another window covers the target:
+    Windows delivers the click to whatever is visually on top. Attach the
+    input queues briefly so SetForegroundWindow can cross thread boundaries,
+    then verify the requested HWND actually became foreground before callers
+    inject input.
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        target = wintypes.HWND(int(hwnd))
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        user32.IsWindow.argtypes = [wintypes.HWND]
+        user32.IsWindow.restype = wintypes.BOOL
+        user32.IsIconic.argtypes = [wintypes.HWND]
+        user32.IsIconic.restype = wintypes.BOOL
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.AttachThreadInput.argtypes = [
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.BOOL,
+        ]
+        user32.AttachThreadInput.restype = wintypes.BOOL
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.BringWindowToTop.restype = wintypes.BOOL
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.SetActiveWindow.argtypes = [wintypes.HWND]
+        user32.SetActiveWindow.restype = wintypes.HWND
+        kernel32.GetCurrentThreadId.argtypes = []
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        if not user32.IsWindow(target):
+            return False
+        if user32.IsIconic(target):
+            user32.ShowWindow(target, 9)  # SW_RESTORE
+        else:
+            user32.ShowWindow(target, 5)  # SW_SHOW
+
+        foreground = user32.GetForegroundWindow()
+        current_tid = kernel32.GetCurrentThreadId()
+        foreground_tid = (
+            user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
+        )
+        target_tid = user32.GetWindowThreadProcessId(target, None)
+        attached: list[int] = []
+        for thread_id in (foreground_tid, target_tid):
+            if thread_id and thread_id != current_tid and thread_id not in attached:
+                if user32.AttachThreadInput(current_tid, thread_id, True):
+                    attached.append(thread_id)
+        try:
+            user32.BringWindowToTop(target)
+            user32.SetForegroundWindow(target)
+            user32.SetActiveWindow(target)
+        finally:
+            for thread_id in reversed(attached):
+                user32.AttachThreadInput(current_tid, thread_id, False)
+
+        for _ in range(6):
+            if int(user32.GetForegroundWindow() or 0) == int(hwnd):
+                return True
+            time.sleep(0.025)
+    except Exception:
+        return False
+    return False

@@ -53,8 +53,8 @@ class CodexDesktopBackend:
 
     def scroll_target(self, region):
         x, y, width, height = [int(v) for v in region]
-        return x + int(round(width * 0.60)), y + int(round(height * 0.45))
+        return x + width // 2, y + height // 2
 
     def send_target(self, region):
         x, y, width, height = [int(v) for v in region]
-        return x + int(round(width * 0.60)), y + int(round(height * 0.92))
+        return x + width // 2, y + height // 2

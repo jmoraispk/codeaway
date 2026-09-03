@@ -25,6 +25,7 @@ const state = {
   autoReloadEnabled: localStorage.getItem("ap.autoreload") === "1",
   intervalSeconds: 10,      // populated from /api/state
   rulesRunning: false,      // populated from /api/state; toggle in settings
+  surfaceBust: 0,          // cache-buster for live Agent Window surfaces
 };
 
 const AUTO_RELOAD_DEFAULT_S = 10;
@@ -262,7 +263,97 @@ function renderWindowDetail(refetchSnapshots) {
     : "";
   $("snap-window-name").textContent = status ? `${name} (${status})` : name;
   renderQueue();
-  if (refetchSnapshots) renderSnapshots();
+  const isAgentWindow = !!(w && w.backend === "codex_desktop");
+  $("agent-window").hidden = !isAgentWindow;
+  $("legacy-snapshots").hidden = isAgentWindow;
+  if (isAgentWindow) {
+    $("agent-calibration").textContent = w.agent_window_configured
+      ? "calibrated"
+      : "using defaults — calibrate on laptop";
+    if (refetchSnapshots) refreshAgentSurfaces();
+  } else if (refetchSnapshots) {
+    renderSnapshots();
+  }
+}
+
+function currentIsAgentWindow() {
+  const w = state.current ? state.windows.get(state.current) : null;
+  return !!(w && w.backend === "codex_desktop");
+}
+
+function agentSurfaceImage(surface) {
+  return surface === "sidebar"
+    ? $("agent-sidebar-img")
+    : $("agent-conversation-img");
+}
+
+async function loadAgentSurface(surface) {
+  const id = state.current;
+  if (!id) return;
+  const img = agentSurfaceImage(surface);
+  const card = img.closest(".agent-surface-card");
+  card.classList.add("loading");
+  card.classList.remove("error");
+  try {
+    const bust = `${Date.now()}-${++state.surfaceBust}`;
+    const res = await fetch(
+      `/api/windows/${encodeURIComponent(id)}/surface/${surface}?t=${bust}`,
+      { cache: "no-store" }
+    );
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    const blob = await res.blob();
+    if (state.current !== id) return;
+    if (img.dataset.objectUrl) URL.revokeObjectURL(img.dataset.objectUrl);
+    const objectUrl = URL.createObjectURL(blob);
+    img.dataset.objectUrl = objectUrl;
+    img.src = objectUrl;
+  } catch (e) {
+    card.classList.add("error");
+    throw new Error(`${surface}: ${e.message}`);
+  } finally {
+    card.classList.remove("loading");
+  }
+}
+
+async function refreshAgentSurfaces(surfaces = ["sidebar", "conversation"], announce = false) {
+  if (!currentIsAgentWindow()) return;
+  try {
+    await Promise.all(surfaces.map(loadAgentSurface));
+    if (announce) setSendStatus("Agent workspace refreshed.", "success");
+  } catch (e) {
+    setSendStatus(`Workspace capture failed: ${e.message}`, "error");
+  }
+}
+
+async function clickAgentSurface(surface, event) {
+  if (!currentIsAgentWindow() || !state.current) return;
+  const img = event.currentTarget;
+  const rect = img.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const xFrac = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  const yFrac = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+  const card = img.closest(".agent-surface-card");
+  card.classList.add("loading");
+  setSendStatus(`Clicking ${surface}…`);
+  try {
+    const res = await fetch(
+      `/api/windows/${encodeURIComponent(state.current)}/click_at`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ surface, x_frac: xFrac, y_frac: yFrac }),
+      }
+    );
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    const data = await res.json();
+    const landed = Array.isArray(data.target) ? ` at ${data.target.join(", ")}` : "";
+    setSendStatus(`Clicked ${surface}${landed}.`, "success");
+    setTimeout(() => refreshAgentSurfaces(), 650);
+  } catch (e) {
+    setSendStatus(`Click failed: ${e.message}`, "error");
+  } finally {
+    card.classList.remove("loading");
+  }
 }
 
 function renderQueue() {
@@ -656,6 +747,9 @@ async function sendOrQueue() {
         setSendStatus(`Queued (#${data.position}). Sends on next idle.`, "success");
       } else {
         setSendStatus("Sent.", "success");
+        if (currentIsAgentWindow()) {
+          setTimeout(() => refreshAgentSurfaces(), 700);
+        }
       }
       $("send-text").value = "";
     } else if (res.status === 202) {
@@ -1244,6 +1338,20 @@ async function recaptureWindow(btn) {
   // on the desktop and the stored tile is showing the wrong content.
   const id = state.current;
   if (!id) return;
+  if (currentIsAgentWindow()) {
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add("loading");
+    }
+    await refreshAgentSurfaces(["sidebar", "conversation"], true);
+    if (btn) {
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.classList.remove("loading");
+      }, 400);
+    }
+    return;
+  }
   if (btn) {
     btn.disabled = true;
     btn.classList.add("loading");
@@ -1294,6 +1402,9 @@ async function scrollWindow(amount, btn) {
       setSendStatus(`Scroll failed: ${res.status} ${detail}`, "error");
     } else {
       setSendStatus("Scrolled. New screenshot incoming.", "success");
+      if (currentIsAgentWindow()) {
+        setTimeout(() => refreshAgentSurfaces(["conversation"]), 700);
+      }
     }
   } catch (e) {
     setSendStatus(`Scroll network error: ${e.message}`, "error");
@@ -1453,6 +1564,18 @@ for (const btn of document.querySelectorAll(".scroll-btn[data-amount]")) {
 }
 $("recapture-btn").addEventListener("click", (e) =>
   recaptureWindow(e.currentTarget)
+);
+$("agent-refresh").addEventListener("click", (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  refreshAgentSurfaces(["sidebar", "conversation"], true)
+    .finally(() => { btn.disabled = false; });
+});
+$("agent-sidebar-img").addEventListener("click", (e) =>
+  clickAgentSurface("sidebar", e)
+);
+$("agent-conversation-img").addEventListener("click", (e) =>
+  clickAgentSurface("conversation", e)
 );
 
 // Desktop browsers don't have native pull-to-refresh, so we approximate
