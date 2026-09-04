@@ -215,15 +215,13 @@ dependencies = [
     { name = "pyside6-fluent-widgets" },
     { name = "pytest" },
     { name = "pywebpush" },
+    { name = "uiautomation", marker = "sys_platform == 'win32'" },
     { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
 ocr = [
     { name = "pytesseract" },
-]
-uia = [
-    { name = "uiautomation" },
 ]
 
 [package.metadata]
@@ -240,10 +238,10 @@ requires-dist = [
     { name = "pytesseract", marker = "extra == 'ocr'", specifier = ">=0.3.10" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pywebpush", specifier = ">=2.0.0" },
-    { name = "uiautomation", marker = "extra == 'uia'", specifier = ">=2.0" },
+    { name = "uiautomation", marker = "sys_platform == 'win32'", specifier = ">=2.0" },
     { name = "uvicorn", specifier = ">=0.29" },
 ]
-provides-extras = ["ocr", "uia"]
+provides-extras = ["ocr"]
 
 [[package]]
 name = "certifi"

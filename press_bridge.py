@@ -67,6 +67,11 @@ class BridgeCallbacks:
     perform_window_click_at: Optional[
         Callable[[dict, float, float, dict], tuple[int, int]]
     ] = None
+    # Codex's local Windows accessibility tree provides a structured phone
+    # navigator. Snapshot returns JSON-safe project/task state; action invokes
+    # one project expand/collapse or task selection without image coordinates.
+    codex_navigator_snapshot: Optional[Callable[[dict], dict]] = None
+    codex_navigator_action: Optional[Callable[[dict, dict], dict]] = None
     perform_read: Optional[Callable[[str, dict], Optional[str]]] = None
     # Hot-reload hook for /api/admin/reload. The callback is expected to
     # importlib.reload(press_bridge) and restart the FastAPI service so
@@ -1132,6 +1137,70 @@ def build_app(service: BridgeService):
     @app.get("/api/windows")
     async def windows_list() -> JSONResponse:
         return JSONResponse(service.windows.summaries())
+
+    @app.get("/api/windows/{window_id}/navigator")
+    async def codex_navigator(window_id: str) -> JSONResponse:
+        """Return the visible Codex project/task tree from Windows UIA."""
+        cfg = service.callbacks.cfg_snapshot()
+        win_cfg = next(
+            (
+                window
+                for window in (cfg.get("bridge") or {}).get("windows", [])
+                if window.get("id") == window_id
+            ),
+            None,
+        )
+        if win_cfg is None:
+            raise HTTPException(status_code=404, detail="window not found")
+        if win_cfg.get("backend") != "codex_desktop":
+            raise HTTPException(status_code=400, detail="navigator requires a Codex window")
+        if service.callbacks.codex_navigator_snapshot is None:
+            raise HTTPException(status_code=501, detail="Codex navigator not wired")
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, service.callbacks.codex_navigator_snapshot, win_cfg
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"navigator unavailable: {exc}") from exc
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/windows/{window_id}/navigator/action")
+    async def codex_navigator_action(window_id: str, payload: dict) -> JSONResponse:
+        """Invoke a structured Codex project or task accessibility element."""
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="action object required")
+        kind = payload.get("kind")
+        project = payload.get("project")
+        if kind not in {"project", "task"} or not isinstance(project, str) or not project.strip():
+            raise HTTPException(status_code=400, detail="kind and project are required")
+        if kind == "project" and not isinstance(payload.get("expanded"), bool):
+            raise HTTPException(status_code=400, detail="expanded (bool) is required")
+        if kind == "task" and (
+            not isinstance(payload.get("title"), str) or not payload["title"].strip()
+        ):
+            raise HTTPException(status_code=400, detail="title is required")
+        cfg = service.callbacks.cfg_snapshot()
+        win_cfg = next(
+            (
+                window
+                for window in (cfg.get("bridge") or {}).get("windows", [])
+                if window.get("id") == window_id
+            ),
+            None,
+        )
+        if win_cfg is None:
+            raise HTTPException(status_code=404, detail="window not found")
+        if win_cfg.get("backend") != "codex_desktop":
+            raise HTTPException(status_code=400, detail="navigator requires a Codex window")
+        if service.callbacks.codex_navigator_action is None:
+            raise HTTPException(status_code=501, detail="Codex navigator not wired")
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, service.callbacks.codex_navigator_action, win_cfg, dict(payload)
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"navigator action failed: {exc}") from exc
+        return JSONResponse(result)
 
     @app.post("/api/windows/{window_id}/send")
     async def window_send(window_id: str, payload: dict) -> JSONResponse:

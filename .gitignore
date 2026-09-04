@@ -24,3 +24,4 @@ logs/
 
 # Local browser smoke-test artifacts
 .playwright-cli/
+output/playwright/

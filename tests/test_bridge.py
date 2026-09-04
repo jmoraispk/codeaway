@@ -575,6 +575,7 @@ def fastapi_client():
         "match": [],
         "window_send": [],
         "window_scroll": [],
+        "navigator_actions": [],
         "rules_running": False,
         "rules_set": [],
         "renames": [],
@@ -612,6 +613,22 @@ def fastapi_client():
             (dict(window), float(x_frac), float(y_frac), target_x, target_y)
         )
         return (target_x, target_y)
+
+    def codex_navigator_snapshot(window):
+        calls.setdefault("navigator_snapshots", []).append(dict(window))
+        return calls.get(
+            "navigator_result",
+            {
+                "available": True,
+                "source": "windows_uia",
+                "projects": [],
+                "captured_at": "2026-09-03T00:00:00Z",
+            },
+        )
+
+    def codex_navigator_action(window, action):
+        calls["navigator_actions"].append((dict(window), dict(action)))
+        return {"acted": True, **action}
 
     def is_rules_running():
         return bool(calls["rules_running"])
@@ -673,6 +690,8 @@ def fastapi_client():
         perform_window_send=perform_window_send,
         perform_window_scroll=perform_window_scroll,
         perform_window_click_at=perform_window_click_at,
+        codex_navigator_snapshot=codex_navigator_snapshot,
+        codex_navigator_action=codex_navigator_action,
         is_rules_running=is_rules_running,
         set_rules_running=set_rules_running,
         rename_window=rename_window,
@@ -693,6 +712,70 @@ def test_events_route_treats_request_as_framework_injection(fastapi_client):
     route = next(route for route in client.app.routes if route.path == "/api/events")
 
     assert route.dependant.query_params == []
+
+
+def test_codex_navigator_endpoint_returns_structured_tree(fastapi_client):
+    client, _service, calls = fastapi_client
+    calls["cfg"]["bridge"] = {
+        "windows": [
+            {
+                "id": "c1",
+                "name": "Codex",
+                "backend": "codex_desktop",
+                "hwnd": 42,
+                "region": [0, 0, 1000, 800],
+            }
+        ]
+    }
+    calls["navigator_result"] = {
+        "available": True,
+        "source": "windows_uia",
+        "projects": [{"name": "AutoPress", "tasks": []}],
+    }
+
+    res = client.get("/api/windows/c1/navigator")
+
+    assert res.status_code == 200
+    assert res.json()["projects"][0]["name"] == "AutoPress"
+    assert res.headers["cache-control"] == "no-store"
+    assert calls["navigator_snapshots"][0]["hwnd"] == 42
+
+
+def test_codex_navigator_action_endpoint_invokes_semantic_target(fastapi_client):
+    client, _service, calls = fastapi_client
+    calls["cfg"]["bridge"] = {
+        "windows": [
+            {
+                "id": "c1",
+                "backend": "codex_desktop",
+                "hwnd": 42,
+                "region": [0, 0, 1000, 800],
+            }
+        ]
+    }
+    payload = {"kind": "task", "project": "AutoPress", "title": "Ship v2"}
+
+    res = client.post("/api/windows/c1/navigator/action", json=payload)
+
+    assert res.status_code == 200
+    assert res.json() == {"acted": True, **payload}
+    assert calls["navigator_actions"][0][1] == payload
+
+
+def test_codex_navigator_rejects_legacy_window_and_bad_actions(fastapi_client):
+    client, _service, calls = fastapi_client
+    calls["cfg"]["bridge"] = {
+        "windows": [{"id": "w1", "backend": "cursor", "region": [0, 0, 10, 10]}]
+    }
+
+    assert client.get("/api/windows/w1/navigator").status_code == 400
+    assert (
+        client.post(
+            "/api/windows/w1/navigator/action",
+            json={"kind": "project", "project": "X"},
+        ).status_code
+        == 400
+    )
 
 
 def test_window_send_endpoint_sends_immediately_when_idle(fastapi_client):

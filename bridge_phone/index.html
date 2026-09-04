@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="stylesheet" href="/static/style.css?v=37">
+  <link rel="stylesheet" href="/static/style.css?v=38">
   <title>auto-press</title>
 </head>
 <body>
@@ -105,17 +105,29 @@
         <article id="agent-sidebar-card" class="agent-surface-card">
           <div class="agent-surface-title">
             <span>Navigator</span>
-            <span class="muted">tap a project or task</span>
+            <span id="agent-navigator-live" class="navigator-live muted">connecting…</span>
           </div>
-          <div class="agent-surface-viewport navigator-viewport">
-            <img id="agent-sidebar-img" alt="Codex project and task sidebar" draggable="false">
+          <div id="agent-navigator" class="agent-navigator" aria-live="polite">
+            <p class="muted navigator-message">Reading the local Codex sidebar…</p>
           </div>
+          <details id="agent-sidebar-fallback" class="navigator-fallback">
+            <summary>Screenshot fallback</summary>
+            <div class="agent-surface-viewport navigator-viewport">
+              <img id="agent-sidebar-img" alt="Codex project and task sidebar" draggable="false">
+            </div>
+          </details>
+          <p class="navigator-legend muted">
+            <span><i class="state-dot connected"></i> connected</span>
+            <span><i class="state-dot done"></i> done</span>
+            <span><i class="busy-spinner"></i> busy</span>
+            <span><b class="worktree-mark">↗</b> worktree</span>
+          </p>
         </article>
 
         <article class="agent-surface-card">
           <div class="agent-surface-title">
             <span>Conversation</span>
-            <span class="muted">tap controls or scroll below</span>
+            <span class="muted">swipe to scroll · tap to click</span>
           </div>
           <div class="agent-surface-viewport conversation-viewport">
             <img id="agent-conversation-img" alt="Current Codex conversation" draggable="false">
@@ -182,6 +194,6 @@
   </div>
 
   <script src="/static/status.js?v=1"></script>
-  <script src="/static/app.js?v=37"></script>
+  <script src="/static/app.js?v=38"></script>
 </body>
 </html>

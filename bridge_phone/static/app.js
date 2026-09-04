@@ -26,6 +26,10 @@ const state = {
   intervalSeconds: 10,      // populated from /api/state
   rulesRunning: false,      // populated from /api/state; toggle in settings
   surfaceBust: 0,          // cache-buster for live Agent Window surfaces
+  navigatorSignature: "", // semantic project/task tree, excluding timestamps
+  navigatorConversationSignature: "", // selected task + task states only
+  navigatorLoading: false,
+  scrollPending: false,
 };
 
 const AUTO_RELOAD_DEFAULT_S = 10;
@@ -194,8 +198,11 @@ function renderWindows() {
 }
 
 function openWindow(id) {
+  stopCodexNavigatorPolling();
   state.view = "snapshots";
   state.current = id;
+  state.navigatorSignature = "";
+  state.navigatorConversationSignature = "";
   // Master-detail: keep the windows list visible above the detail
   // panel. The selected row is highlighted via renderWindows.
   $("snapshots-section").hidden = false;
@@ -208,6 +215,7 @@ function openWindow(id) {
 }
 
 function closeSnapshots() {
+  stopCodexNavigatorPolling();
   state.view = "list";
   state.current = null;
   $("snapshots-section").hidden = true;
@@ -270,8 +278,14 @@ function renderWindowDetail(refetchSnapshots) {
     $("agent-calibration").textContent = w.agent_window_configured
       ? "calibrated"
       : "using defaults — calibrate on laptop";
-    if (refetchSnapshots) refreshAgentSurfaces();
+    startCodexNavigatorPolling();
+    if (refetchSnapshots) {
+      refreshCodexNavigator({ conversationOnChange: false });
+      refreshAgentSurfaces(["conversation"]);
+      if ($("agent-sidebar-fallback").open) loadAgentSurface("sidebar");
+    }
   } else if (refetchSnapshots) {
+    stopCodexNavigatorPolling();
     renderSnapshots();
   }
 }
@@ -279,6 +293,229 @@ function renderWindowDetail(refetchSnapshots) {
 function currentIsAgentWindow() {
   const w = state.current ? state.windows.get(state.current) : null;
   return !!(w && w.backend === "codex_desktop");
+}
+
+function navigatorSignature(data) {
+  return JSON.stringify((data && data.projects) || []);
+}
+
+function navigatorConversationSignature(data) {
+  return JSON.stringify(
+    ((data && data.projects) || []).flatMap((project) =>
+      (project.tasks || []).map((task) => [
+        project.name,
+        task.title,
+        task.state,
+        Boolean(task.selected),
+      ])
+    )
+  );
+}
+
+function navigatorStateVisual(stateName) {
+  if (stateName === "done") {
+    const dot = document.createElement("i");
+    dot.className = "state-dot done";
+    dot.title = "Done";
+    dot.setAttribute("aria-label", "Done");
+    return dot;
+  }
+  if (stateName === "busy") {
+    const spinner = document.createElement("i");
+    spinner.className = "busy-spinner";
+    spinner.title = "Busy";
+    spinner.setAttribute("aria-label", "Busy");
+    return spinner;
+  }
+  if (stateName === "connected") {
+    const dot = document.createElement("i");
+    dot.className = "state-dot connected";
+    dot.title = "Connected";
+    dot.setAttribute("aria-label", "Connected");
+    return dot;
+  }
+  return null;
+}
+
+function renderCodexNavigator(data) {
+  const root = $("agent-navigator");
+  root.innerHTML = "";
+  const projects = (data && data.projects) || [];
+  if (!projects.length) {
+    const message = document.createElement("p");
+    message.className = "muted navigator-message";
+    message.textContent = "No visible Codex projects. Open the sidebar or use the screenshot fallback.";
+    root.appendChild(message);
+    return;
+  }
+
+  for (const project of projects) {
+    const section = document.createElement("section");
+    section.className = `navigator-project${project.expanded ? "" : " collapsed"}`;
+
+    const projectButton = document.createElement("button");
+    projectButton.type = "button";
+    projectButton.className = "navigator-project-row";
+    projectButton.setAttribute("aria-expanded", String(Boolean(project.expanded)));
+    projectButton.setAttribute("aria-label", `${project.expanded ? "Collapse" : "Expand"} ${project.name}`);
+
+    const chevron = document.createElement("span");
+    chevron.className = "navigator-chevron";
+    chevron.textContent = "▾";
+    chevron.setAttribute("aria-hidden", "true");
+    projectButton.appendChild(chevron);
+
+    const name = document.createElement("span");
+    name.className = "navigator-name";
+    name.textContent = project.name;
+    projectButton.appendChild(name);
+
+    const host = document.createElement("span");
+    host.className = "navigator-host";
+    host.textContent = project.host || "";
+    projectButton.appendChild(host);
+
+    const projectState = document.createElement("span");
+    projectState.className = "navigator-project-state";
+    const projectVisual = navigatorStateVisual(project.state);
+    if (projectVisual) projectState.appendChild(projectVisual);
+    projectButton.appendChild(projectState);
+    projectButton.addEventListener("click", () =>
+      runCodexNavigatorAction(
+        { kind: "project", project: project.name, expanded: !project.expanded },
+        projectButton
+      )
+    );
+    section.appendChild(projectButton);
+
+    const tasks = document.createElement("div");
+    tasks.className = "navigator-tasks";
+    for (const task of project.tasks || []) {
+      const taskButton = document.createElement("button");
+      taskButton.type = "button";
+      taskButton.className = `navigator-task-row${task.selected ? " selected" : ""}`;
+      taskButton.setAttribute("aria-label", `Open ${task.title}`);
+
+      const title = document.createElement("span");
+      title.className = "navigator-task-title";
+      title.textContent = task.title;
+      taskButton.appendChild(title);
+
+      const meta = document.createElement("span");
+      meta.className = "navigator-task-meta";
+      if (task.worktree) {
+        const worktree = document.createElement("b");
+        worktree.className = "worktree-mark";
+        worktree.textContent = "↗";
+        worktree.title = "Separate worktree";
+        worktree.setAttribute("aria-label", "Separate worktree");
+        meta.appendChild(worktree);
+      }
+      const taskVisual = navigatorStateVisual(task.state);
+      if (taskVisual) meta.appendChild(taskVisual);
+      taskButton.appendChild(meta);
+      taskButton.addEventListener("click", () =>
+        runCodexNavigatorAction(
+          { kind: "task", project: project.name, title: task.title },
+          taskButton
+        )
+      );
+      tasks.appendChild(taskButton);
+    }
+    if (project.expanded && !(project.tasks || []).length) {
+      const empty = document.createElement("span");
+      empty.className = "navigator-empty";
+      empty.textContent = "No visible tasks";
+      tasks.appendChild(empty);
+    }
+    section.appendChild(tasks);
+    root.appendChild(section);
+  }
+}
+
+async function refreshCodexNavigator({ announce = false, conversationOnChange = true } = {}) {
+  const id = state.current;
+  if (!id || !currentIsAgentWindow() || state.navigatorLoading) return;
+  state.navigatorLoading = true;
+  const live = $("agent-navigator-live");
+  live.textContent = "syncing…";
+  live.classList.remove("live");
+  try {
+    const res = await fetch(`/api/windows/${encodeURIComponent(id)}/navigator`, {
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    const data = await res.json();
+    if (state.current !== id) return;
+    const nextSignature = navigatorSignature(data);
+    const nextConversationSignature = navigatorConversationSignature(data);
+    const changed = nextSignature !== state.navigatorSignature;
+    const conversationChanged =
+      Boolean(state.navigatorConversationSignature) &&
+      nextConversationSignature !== state.navigatorConversationSignature;
+    if (changed) renderCodexNavigator(data);
+    state.navigatorSignature = nextSignature;
+    state.navigatorConversationSignature = nextConversationSignature;
+    live.textContent = data.pixel_states ? "live" : "live · visual states pending";
+    live.classList.add("live");
+    if (announce) setSendStatus("Navigator refreshed.", "success");
+    if (conversationOnChange && conversationChanged) {
+      setTimeout(() => refreshAgentSurfaces(["conversation"]), 300);
+    }
+  } catch (e) {
+    if (state.current !== id) return;
+    live.textContent = "retrying…";
+    live.classList.remove("live");
+    if (!state.navigatorSignature) {
+      renderCodexNavigator({ projects: [] });
+      $("agent-sidebar-fallback").open = true;
+      loadAgentSurface("sidebar").catch(() => {});
+    }
+    if (announce) setSendStatus(`Navigator failed: ${e.message}`, "error");
+  } finally {
+    state.navigatorLoading = false;
+  }
+}
+
+async function runCodexNavigatorAction(payload, button) {
+  const id = state.current;
+  if (!id || !currentIsAgentWindow()) return;
+  if (button) button.disabled = true;
+  const label = payload.kind === "task" ? payload.title : payload.project;
+  setSendStatus(`${payload.kind === "task" ? "Opening" : "Updating"} ${label}…`);
+  try {
+    const res = await fetch(
+      `/api/windows/${encodeURIComponent(id)}/navigator/action`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }
+    );
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    setSendStatus(payload.kind === "task" ? `Opened ${label}.` : `Updated ${label}.`, "success");
+    setTimeout(() => {
+      refreshCodexNavigator({ conversationOnChange: false });
+      if (payload.kind === "task") refreshAgentSurfaces(["conversation"]);
+    }, 350);
+  } catch (e) {
+    setSendStatus(`Navigator action failed: ${e.message}`, "error");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+let codexNavigatorPollHandle = null;
+function startCodexNavigatorPolling() {
+  if (codexNavigatorPollHandle) return;
+  codexNavigatorPollHandle = setInterval(() => {
+    if (!document.hidden && currentIsAgentWindow()) refreshCodexNavigator();
+  }, 1800);
+}
+
+function stopCodexNavigatorPolling() {
+  if (codexNavigatorPollHandle) clearInterval(codexNavigatorPollHandle);
+  codexNavigatorPollHandle = null;
 }
 
 function agentSurfaceImage(surface) {
@@ -315,7 +552,7 @@ async function loadAgentSurface(surface) {
   }
 }
 
-async function refreshAgentSurfaces(surfaces = ["sidebar", "conversation"], announce = false) {
+async function refreshAgentSurfaces(surfaces = ["conversation"], announce = false) {
   if (!currentIsAgentWindow()) return;
   try {
     await Promise.all(surfaces.map(loadAgentSurface));
@@ -1343,7 +1580,10 @@ async function recaptureWindow(btn) {
       btn.disabled = true;
       btn.classList.add("loading");
     }
-    await refreshAgentSurfaces(["sidebar", "conversation"], true);
+    await refreshCodexNavigator({ announce: true, conversationOnChange: false });
+    const surfaces = ["conversation"];
+    if ($("agent-sidebar-fallback").open) surfaces.push("sidebar");
+    await refreshAgentSurfaces(surfaces, false);
     if (btn) {
       setTimeout(() => {
         btn.disabled = false;
@@ -1383,7 +1623,8 @@ async function recaptureWindow(btn) {
 
 async function scrollWindow(amount, btn) {
   const id = state.current;
-  if (!id) return;
+  if (!id || state.scrollPending) return;
+  state.scrollPending = true;
   if (btn) {
     btn.disabled = true;
     btn.classList.add("loading");
@@ -1403,12 +1644,13 @@ async function scrollWindow(amount, btn) {
     } else {
       setSendStatus("Scrolled. New screenshot incoming.", "success");
       if (currentIsAgentWindow()) {
-        setTimeout(() => refreshAgentSurfaces(["conversation"]), 700);
+        setTimeout(() => refreshAgentSurfaces(["conversation"]), 350);
       }
     }
   } catch (e) {
     setSendStatus(`Scroll network error: ${e.message}`, "error");
   } finally {
+    state.scrollPending = false;
     if (btn) {
       // Lockout long enough for the post-scroll capture to settle and
       // the SSE event to land — otherwise a fast double-tap shoots
@@ -1416,7 +1658,7 @@ async function scrollWindow(amount, btn) {
       setTimeout(() => {
         btn.disabled = false;
         btn.classList.remove("loading");
-      }, 1200);
+      }, 800);
     }
   }
 }
@@ -1568,15 +1810,71 @@ $("recapture-btn").addEventListener("click", (e) =>
 $("agent-refresh").addEventListener("click", (e) => {
   const btn = e.currentTarget;
   btn.disabled = true;
-  refreshAgentSurfaces(["sidebar", "conversation"], true)
+  const surfaces = ["conversation"];
+  if ($("agent-sidebar-fallback").open) surfaces.push("sidebar");
+  Promise.all([
+    refreshCodexNavigator({ announce: true, conversationOnChange: false }),
+    refreshAgentSurfaces(surfaces),
+  ])
     .finally(() => { btn.disabled = false; });
 });
 $("agent-sidebar-img").addEventListener("click", (e) =>
   clickAgentSurface("sidebar", e)
 );
-$("agent-conversation-img").addEventListener("click", (e) =>
-  clickAgentSurface("conversation", e)
-);
+$("agent-sidebar-fallback").addEventListener("toggle", (e) => {
+  if (e.currentTarget.open && currentIsAgentWindow()) {
+    loadAgentSurface("sidebar").catch(() => {});
+  }
+});
+
+// Conversation gestures are phone-native: a tap remains an exact desktop
+// click, while a vertical swipe becomes a distance-scaled wheel batch. The
+// screenshot refreshes once the gesture settles rather than on every move.
+let conversationGesture = null;
+const conversationImage = $("agent-conversation-img");
+conversationImage.addEventListener("pointerdown", (e) => {
+  if (!currentIsAgentWindow() || (e.pointerType === "mouse" && e.button !== 0)) return;
+  conversationGesture = {
+    pointerId: e.pointerId,
+    startY: e.clientY,
+    lastY: e.clientY,
+    startedAt: performance.now(),
+    moved: false,
+  };
+  try { conversationImage.setPointerCapture(e.pointerId); } catch {}
+  conversationImage.closest(".conversation-viewport").classList.add("gesture-active");
+});
+conversationImage.addEventListener("pointermove", (e) => {
+  if (!conversationGesture || conversationGesture.pointerId !== e.pointerId) return;
+  conversationGesture.lastY = e.clientY;
+  if (Math.abs(e.clientY - conversationGesture.startY) > 10) {
+    conversationGesture.moved = true;
+    e.preventDefault();
+  }
+});
+conversationImage.addEventListener("pointerup", (e) => {
+  if (!conversationGesture || conversationGesture.pointerId !== e.pointerId) return;
+  const gesture = conversationGesture;
+  conversationGesture = null;
+  conversationImage.closest(".conversation-viewport").classList.remove("gesture-active");
+  try { conversationImage.releasePointerCapture(e.pointerId); } catch {}
+  const deltaY = e.clientY - gesture.startY;
+  if (!gesture.moved || Math.abs(deltaY) < 24) {
+    clickAgentSurface("conversation", e);
+    return;
+  }
+  e.preventDefault();
+  const elapsed = Math.max(80, performance.now() - gesture.startedAt);
+  const velocityBoost = Math.min(1.8, 1 + Math.abs(deltaY) / elapsed);
+  const rawAmount = Math.round((deltaY / 13) * velocityBoost);
+  const amount = Math.sign(rawAmount) * Math.max(4, Math.min(42, Math.abs(rawAmount)));
+  scrollWindow(amount, null);
+});
+conversationImage.addEventListener("pointercancel", (e) => {
+  if (!conversationGesture || conversationGesture.pointerId !== e.pointerId) return;
+  conversationGesture = null;
+  conversationImage.closest(".conversation-viewport").classList.remove("gesture-active");
+});
 
 // Desktop browsers don't have native pull-to-refresh, so we approximate
 // it: when the page is already at the top and the user keeps scrolling

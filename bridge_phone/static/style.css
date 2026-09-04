@@ -412,9 +412,8 @@ button.primary {
   margin: 6px 0 4px;
 }
 
-/* Codex Agent Window v2: the task navigator remains visible while the
-   conversation and composer sit below it. Each image is a real calibrated
-   desktop surface, not a CSS crop of a full-window screenshot. */
+/* Codex Agent Window v2.1: UI Automation renders a native navigator while
+   screenshots remain the conversation transport and sidebar fallback. */
 #agent-window {
   display: flex;
   flex-direction: column;
@@ -449,6 +448,166 @@ button.primary {
   margin: 0 2px 6px;
 }
 .agent-surface-title .muted { font-size: 10px; font-weight: 400; }
+.navigator-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.navigator-live.live { color: var(--green); }
+.navigator-live.live::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+.agent-navigator {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 46dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.navigator-message {
+  margin: 0;
+  padding: 14px 10px;
+  text-align: center;
+  font-size: 12px;
+}
+.navigator-project {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.018);
+}
+.navigator-project-row,
+.navigator-task-row {
+  appearance: none;
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  color: var(--fg);
+  background: transparent;
+  display: grid;
+  align-items: center;
+  text-align: left;
+  font: inherit;
+}
+.navigator-project-row {
+  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  gap: 7px;
+  min-height: 42px;
+  padding: 7px 9px;
+  font-weight: 650;
+}
+.navigator-project-row:active,
+.navigator-task-row:active { background: rgba(43, 125, 233, 0.18); }
+.navigator-chevron {
+  color: var(--muted);
+  font-size: 11px;
+  transition: transform 120ms ease;
+}
+.navigator-project.collapsed .navigator-chevron { transform: rotate(-90deg); }
+.navigator-name,
+.navigator-task-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.navigator-host {
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.navigator-project-state,
+.navigator-task-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  min-width: 16px;
+}
+.navigator-tasks { border-top: 1px solid rgba(255, 255, 255, 0.055); }
+.navigator-project.collapsed .navigator-tasks { display: none; }
+.navigator-task-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  min-height: 40px;
+  padding: 7px 9px 7px 29px;
+  font-size: 13px;
+  border-top: 1px solid rgba(255, 255, 255, 0.035);
+}
+.navigator-task-row:first-child { border-top: 0; }
+.navigator-task-row.selected {
+  background: rgba(255, 255, 255, 0.075);
+  box-shadow: inset 2px 0 var(--accent);
+}
+.state-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #687084;
+  flex: 0 0 auto;
+}
+.state-dot.connected { background: #42d287; }
+.state-dot.done {
+  background: #3b82f6;
+  box-shadow: 0 0 7px rgba(59, 130, 246, 0.5);
+}
+.busy-spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid #6d7480;
+  border-right-color: #d7dbe3;
+  border-radius: 50%;
+  animation: navigator-spin 850ms linear infinite;
+  flex: 0 0 auto;
+}
+@keyframes navigator-spin { to { transform: rotate(360deg); } }
+.worktree-mark {
+  display: inline-block;
+  color: #a1a8b7;
+  font-size: 15px;
+  line-height: 1;
+  font-weight: 500;
+}
+.navigator-empty {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 0 9px 8px 29px;
+}
+.navigator-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 11px;
+  margin: 7px 2px 0;
+  font-size: 10px;
+}
+.navigator-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.navigator-legend .state-dot { width: 7px; height: 7px; }
+.navigator-legend .busy-spinner { width: 10px; height: 10px; border-width: 1.5px; }
+.navigator-fallback {
+  margin-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+  padding-top: 6px;
+}
+.navigator-fallback summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+}
+.navigator-fallback[open] summary { margin-bottom: 6px; }
 .agent-surface-viewport {
   overflow: auto;
   border-radius: 7px;
@@ -470,6 +629,11 @@ button.primary {
 }
 .navigator-viewport { max-height: 42dvh; }
 .conversation-viewport { max-height: 58dvh; }
+.conversation-viewport {
+  touch-action: none;
+  cursor: grab;
+}
+.conversation-viewport.gesture-active { cursor: grabbing; }
 #agent-sidebar-card {
   position: sticky;
   top: calc(4px + var(--safe-top));

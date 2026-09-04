@@ -475,7 +475,17 @@ def focus_and_scroll(point: tuple[int, int], amount: int) -> None:
     x, y = int(point[0]), int(point[1])
     _click_at_target(x, y)
     time.sleep(0.1)
-    pyautogui.scroll(int(amount), x=x, y=y)
+    remaining = abs(int(amount))
+    direction = 1 if int(amount) > 0 else -1
+    # Chromium occasionally drops a single large wheel injection. Small,
+    # paced chunks behave like a physical wheel and make phone swipes
+    # proportional without flooding the desktop event queue.
+    while remaining:
+        step = min(3, remaining)
+        pyautogui.scroll(direction * step, x=x, y=y)
+        remaining -= step
+        if remaining:
+            time.sleep(0.025)
 
 
 def get_clipboard_text() -> str:

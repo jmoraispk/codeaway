@@ -4244,6 +4244,8 @@ class MainWindow(QMainWindow):
             perform_window_send=self._bridge_perform_window_send,
             perform_window_scroll=self._bridge_perform_window_scroll,
             perform_window_click_at=self._bridge_perform_window_click_at,
+            codex_navigator_snapshot=self._bridge_codex_navigator_snapshot,
+            codex_navigator_action=self._bridge_codex_navigator_action,
             perform_read=None,
             request_reload=self._bridge_request_reload,
             is_rules_running=self._bridge_is_rules_running,
@@ -4483,6 +4485,19 @@ class MainWindow(QMainWindow):
         target_x, target_y = target
         click_point((target_x, target_y))
         return (target_x, target_y)
+
+    def _bridge_codex_navigator_snapshot(self, window: dict) -> dict:
+        """Worker-thread callable: expose the local Codex UIA tree as JSON."""
+        from press_codex_accessibility import read_codex_navigator
+
+        return read_codex_navigator(window)
+
+    def _bridge_codex_navigator_action(self, window: dict, action: dict) -> dict:
+        """Worker-thread callable: invoke a Codex project/task UIA element."""
+        from press_codex_accessibility import perform_codex_navigator_action
+
+        self._bridge_activate_window(window)
+        return perform_codex_navigator_action(window, action)
 
     def _bridge_is_rules_running(self) -> bool:
         """Read the engine running flag — called from the bridge's request

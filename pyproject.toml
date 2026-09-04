@@ -24,14 +24,14 @@ dependencies = [
     # first launch.
     "pywebpush>=2.0.0",
     "cryptography>=42.0",
+    # Structured Codex navigation through the local Windows accessibility
+    # tree. The platform marker keeps non-Windows installs unchanged.
+    "uiautomation>=2.0; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
 ocr = [
     "pytesseract>=0.3.10",
-]
-uia = [
-    "uiautomation>=2.0",
 ]
 
 [project.scripts]

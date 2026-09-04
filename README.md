@@ -102,10 +102,18 @@ window:
 5. Choose **Set composer** and drag around the message input box.
 
 The phone then shows a persistent Navigator above the current Conversation.
-Taps activate the exact Codex HWND before clicking, scrolling uses native
-wheel input inside the calibrated conversation, and Send targets the
-calibrated composer. Calibration is stored as window-relative coordinates, so
-moving or resizing Codex does not require repeating it.
+On Windows, v2.1 reads that navigator from Codex's accessibility tree instead
+of making you click a sidebar screenshot. Projects and tasks update
+automatically; task buttons open the matching Codex task directly, and project
+buttons expand or collapse it. Green means connected, blue means done, the
+animated ring means busy, and `↗` means a separate worktree. The old clickable
+sidebar image remains under **Screenshot fallback**.
+
+Swipe vertically on the Conversation image to send a distance-scaled batch of
+wheel events, or use the Scroll buttons for fixed steps. Taps still activate
+the exact Codex HWND before clicking, and Send targets the calibrated composer.
+Calibration is stored as window-relative coordinates, so moving or resizing
+Codex does not require repeating it.
 
 ## ❓ FAQ
 
