@@ -8,7 +8,7 @@ import pyautogui
 
 MODE_CLICK = "click"
 MODE_CLICK_ENTER = "click+enter"
-CODEX_WHEEL_STEP = 60
+CODEX_WHEEL_STEP = 40
 
 
 def _pin_thread_v2_dpi() -> None:
@@ -483,8 +483,8 @@ def focus_and_scroll(point: tuple[int, int], amount: int) -> None:
     # proportional without flooding the desktop event queue. PyAutoGUI's
     # Windows adapter forwards ``clicks`` directly as Win32 ``mouseData``.
     # Windows defines one complete wheel detent as 120 units; Codex responds
-    # best to a 60-unit half-detent per logical phone step. Sending bare values
-    # such as 3 produces only a few pixels, while full detents over-travel.
+    # best to a 40-unit third-detent per logical phone step. Sending bare values
+    # such as 3 produces only a few pixels, while larger steps over-travel.
     while remaining:
         step = min(3, remaining)
         pyautogui.scroll(direction * step * CODEX_WHEEL_STEP, x=x, y=y)

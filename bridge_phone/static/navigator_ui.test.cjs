@@ -53,3 +53,41 @@ test("only initial and explicit refreshes show syncing", () => {
   assert.equal(shouldShowNavigatorSync({ announce: true, hasSnapshot: true }), true);
   assert.equal(shouldShowNavigatorSync({ announce: false, hasSnapshot: true }), false);
 });
+
+function fakeComposerSlots(initialParent) {
+  const composer = { parentElement: initialParent };
+  const makeSlot = (name) => ({
+    name,
+    appends: 0,
+    appendChild(node) {
+      this.appends += 1;
+      node.parentElement = this;
+    },
+  });
+  return {
+    composer,
+    agentSlot: makeSlot("agent"),
+    legacySlot: makeSlot("legacy"),
+  };
+}
+
+test("Codex composer moves into the agent workspace slot", () => {
+  const { placeComposerForWindow } = loadHelpers();
+  const slots = fakeComposerSlots();
+
+  placeComposerForWindow({ ...slots, isAgentWindow: true });
+
+  assert.equal(slots.composer.parentElement, slots.agentSlot);
+  assert.equal(slots.agentSlot.appends, 1);
+});
+
+test("legacy composer moves back to the shared detail slot", () => {
+  const { placeComposerForWindow } = loadHelpers();
+  const slots = fakeComposerSlots();
+  slots.composer.parentElement = slots.agentSlot;
+
+  placeComposerForWindow({ ...slots, isAgentWindow: false });
+
+  assert.equal(slots.composer.parentElement, slots.legacySlot);
+  assert.equal(slots.legacySlot.appends, 1);
+});

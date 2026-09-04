@@ -272,6 +272,12 @@ function renderWindowDetail(refetchSnapshots) {
   $("snap-window-name").textContent = status ? `${name} (${status})` : name;
   renderQueue();
   const isAgentWindow = !!(w && w.backend === "codex_desktop");
+  AutoPressNavigatorUI.placeComposerForWindow({
+    composer: $("composer"),
+    agentSlot: $("agent-composer-slot"),
+    legacySlot: $("legacy-composer-slot"),
+    isAgentWindow,
+  });
   $("agent-window").hidden = !isAgentWindow;
   $("legacy-snapshots").hidden = isAgentWindow;
   if (isAgentWindow) {

@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icon-192.png">
-  <link rel="stylesheet" href="/static/style.css?v=40">
+  <link rel="stylesheet" href="/static/style.css?v=41">
   <title>auto-press</title>
 </head>
 <body>
@@ -133,14 +133,18 @@
             <img id="agent-conversation-img" alt="Current Codex conversation" draggable="false">
           </div>
         </article>
+
+        <div id="agent-composer-slot"></div>
       </section>
 
-      <div id="composer">
-        <textarea id="send-text" rows="3" placeholder="Paste, type, or leave empty (just clicks + Enter)."></textarea>
-        <div class="row">
-          <button id="send-go" class="primary">Send</button>
+      <div id="legacy-composer-slot">
+        <div id="composer">
+          <textarea id="send-text" rows="3" placeholder="Paste, type, or leave empty (just clicks + Enter)."></textarea>
+          <div class="row">
+            <button id="send-go" class="primary">Send</button>
+          </div>
+          <p id="send-status" class="status"></p>
         </div>
-        <p id="send-status" class="status"></p>
       </div>
 
       <div id="queue-section" hidden>
@@ -194,7 +198,7 @@
   </div>
 
   <script src="/static/status.js?v=1"></script>
-  <script src="/static/navigator_ui.js?v=1"></script>
-  <script src="/static/app.js?v=40"></script>
+  <script src="/static/navigator_ui.js?v=2"></script>
+  <script src="/static/app.js?v=41"></script>
 </body>
 </html>

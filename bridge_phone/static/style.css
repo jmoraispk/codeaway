@@ -466,10 +466,6 @@ button.primary {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 46dvh;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
 }
 .navigator-message {
   margin: 0;
@@ -642,10 +638,10 @@ button.primary {
 }
 .conversation-viewport.gesture-active { cursor: grabbing; }
 #agent-sidebar-card {
-  position: sticky;
-  top: calc(4px + var(--safe-top));
-  z-index: 5;
+  position: static;
 }
+#agent-composer-slot:empty,
+#legacy-composer-slot:empty { display: none; }
 .agent-surface-card.loading img { opacity: 0.45; }
 .agent-surface-card.error { border-color: rgba(239, 68, 68, 0.65); }
 #snap-back {

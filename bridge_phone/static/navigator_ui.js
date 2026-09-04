@@ -25,8 +25,21 @@ function shouldShowNavigatorSync({ announce = false, hasSnapshot = false } = {})
   return Boolean(announce || !hasSnapshot);
 }
 
+function placeComposerForWindow({
+  composer,
+  agentSlot,
+  legacySlot,
+  isAgentWindow,
+}) {
+  const target = isAgentWindow ? agentSlot : legacySlot;
+  if (composer && target && composer.parentElement !== target) {
+    target.appendChild(composer);
+  }
+}
+
 const navigatorUiHelpers = {
   beginProjectExpansion,
+  placeComposerForWindow,
   shouldShowNavigatorSync,
 };
 if (typeof module !== "undefined" && module.exports) {
