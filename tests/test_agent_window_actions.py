@@ -85,7 +85,7 @@ def test_failed_codex_activation_stops_action(monkeypatch):
         )
 
 
-def test_focus_and_scroll_paces_large_wheel_gestures(monkeypatch):
+def test_focus_and_scroll_uses_half_detents_for_codex(monkeypatch):
     import press_core
 
     clicks = []
@@ -102,7 +102,10 @@ def test_focus_and_scroll_paces_large_wheel_gestures(monkeypatch):
     press_core.focus_and_scroll((500, 600), -8)
 
     assert clicks == [(500, 600)]
-    assert wheels == [(-3, 500, 600), (-3, 500, 600), (-2, 500, 600)]
+    # PyAutoGUI forwards its value directly as Win32 mouseData. A 60-unit
+    # logical step is half a Windows detent: strong enough for Chromium to
+    # consume immediately without the over-travel of the original 120.
+    assert wheels == [(-180, 500, 600), (-180, 500, 600), (-120, 500, 600)]
 
 
 def test_codex_navigator_action_activates_before_uia_invoke(monkeypatch):

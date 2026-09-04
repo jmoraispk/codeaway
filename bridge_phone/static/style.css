@@ -478,6 +478,7 @@ button.primary {
   font-size: 12px;
 }
 .navigator-project {
+  flex: 0 0 auto;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 8px;
@@ -497,7 +498,7 @@ button.primary {
   font: inherit;
 }
 .navigator-project-row {
-  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  grid-template-columns: 18px minmax(0, 1fr) auto auto;
   gap: 7px;
   min-height: 42px;
   padding: 7px 9px;
@@ -506,9 +507,14 @@ button.primary {
 .navigator-project-row:active,
 .navigator-task-row:active { background: rgba(43, 125, 233, 0.18); }
 .navigator-chevron {
-  color: var(--muted);
-  font-size: 11px;
+  display: block;
+  width: 16px;
+  height: 16px;
+  justify-self: center;
+  object-fit: contain;
+  opacity: 0.82;
   transition: transform 120ms ease;
+  transform-origin: center;
 }
 .navigator-project.collapsed .navigator-chevron { transform: rotate(-90deg); }
 .navigator-name,
@@ -574,11 +580,12 @@ button.primary {
 }
 @keyframes navigator-spin { to { transform: rotate(360deg); } }
 .worktree-mark {
-  display: inline-block;
-  color: #a1a8b7;
-  font-size: 15px;
-  line-height: 1;
-  font-weight: 500;
+  display: block;
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  opacity: 0.9;
+  flex: 0 0 auto;
 }
 .navigator-empty {
   display: block;

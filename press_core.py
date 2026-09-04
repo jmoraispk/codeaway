@@ -8,6 +8,7 @@ import pyautogui
 
 MODE_CLICK = "click"
 MODE_CLICK_ENTER = "click+enter"
+CODEX_WHEEL_STEP = 60
 
 
 def _pin_thread_v2_dpi() -> None:
@@ -479,10 +480,14 @@ def focus_and_scroll(point: tuple[int, int], amount: int) -> None:
     direction = 1 if int(amount) > 0 else -1
     # Chromium occasionally drops a single large wheel injection. Small,
     # paced chunks behave like a physical wheel and make phone swipes
-    # proportional without flooding the desktop event queue.
+    # proportional without flooding the desktop event queue. PyAutoGUI's
+    # Windows adapter forwards ``clicks`` directly as Win32 ``mouseData``.
+    # Windows defines one complete wheel detent as 120 units; Codex responds
+    # best to a 60-unit half-detent per logical phone step. Sending bare values
+    # such as 3 produces only a few pixels, while full detents over-travel.
     while remaining:
         step = min(3, remaining)
-        pyautogui.scroll(direction * step, x=x, y=y)
+        pyautogui.scroll(direction * step * CODEX_WHEEL_STEP, x=x, y=y)
         remaining -= step
         if remaining:
             time.sleep(0.025)

@@ -359,9 +359,10 @@ function renderCodexNavigator(data) {
     projectButton.setAttribute("aria-expanded", String(Boolean(project.expanded)));
     projectButton.setAttribute("aria-label", `${project.expanded ? "Collapse" : "Expand"} ${project.name}`);
 
-    const chevron = document.createElement("span");
+    const chevron = document.createElement("img");
     chevron.className = "navigator-chevron";
-    chevron.textContent = "▾";
+    chevron.src = "/static/project-chevron.svg";
+    chevron.alt = "";
     chevron.setAttribute("aria-hidden", "true");
     projectButton.appendChild(chevron);
 
@@ -404,9 +405,10 @@ function renderCodexNavigator(data) {
       const meta = document.createElement("span");
       meta.className = "navigator-task-meta";
       if (task.worktree) {
-        const worktree = document.createElement("b");
+        const worktree = document.createElement("img");
         worktree.className = "worktree-mark";
-        worktree.textContent = "↗";
+        worktree.src = "/static/worktree.svg";
+        worktree.alt = "";
         worktree.title = "Separate worktree";
         worktree.setAttribute("aria-label", "Separate worktree");
         meta.appendChild(worktree);
@@ -438,8 +440,14 @@ async function refreshCodexNavigator({ announce = false, conversationOnChange = 
   if (!id || !currentIsAgentWindow() || state.navigatorLoading) return;
   state.navigatorLoading = true;
   const live = $("agent-navigator-live");
-  live.textContent = "syncing…";
-  live.classList.remove("live");
+  const showSync = AutoPressNavigatorUI.shouldShowNavigatorSync({
+    announce,
+    hasSnapshot: Boolean(state.navigatorSignature),
+  });
+  if (showSync) {
+    live.textContent = "syncing…";
+    live.classList.remove("live");
+  }
   try {
     const res = await fetch(`/api/windows/${encodeURIComponent(id)}/navigator`, {
       cache: "no-store",
@@ -480,6 +488,13 @@ async function refreshCodexNavigator({ announce = false, conversationOnChange = 
 async function runCodexNavigatorAction(payload, button) {
   const id = state.current;
   if (!id || !currentIsAgentWindow()) return;
+  const rollbackProjectExpansion = payload.kind === "project" && button
+    ? AutoPressNavigatorUI.beginProjectExpansion(
+        button,
+        payload.project,
+        payload.expanded
+      )
+    : null;
   if (button) button.disabled = true;
   const label = payload.kind === "task" ? payload.title : payload.project;
   setSendStatus(`${payload.kind === "task" ? "Opening" : "Updating"} ${label}…`);
@@ -499,6 +514,7 @@ async function runCodexNavigatorAction(payload, button) {
       if (payload.kind === "task") refreshAgentSurfaces(["conversation"]);
     }, 350);
   } catch (e) {
+    if (rollbackProjectExpansion) rollbackProjectExpansion();
     setSendStatus(`Navigator action failed: ${e.message}`, "error");
   } finally {
     if (button) button.disabled = false;
